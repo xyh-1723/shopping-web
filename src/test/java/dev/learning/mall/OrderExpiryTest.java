@@ -109,7 +109,8 @@ class OrderExpiryTest {
         assertThat(closed.closeReason()).isEqualTo("TIMEOUT");
         assertThat(closed.closedAt()).isNotNull();
         assertThat(products.get(1).stock()).isEqualTo(10);
-        assertThat(eventType()).isEqualTo("ORDER_CLOSED_TIMEOUT");
+        // 不写「最新一条事件是 ORDER_CLOSED_TIMEOUT」，见 eventTypes() 的说明。
+        assertThat(eventTypes()).containsExactlyInAnyOrder("ORDER_CREATED", "ORDER_CLOSED_TIMEOUT");
     }
 
     @Test
@@ -333,6 +334,12 @@ class OrderExpiryTest {
         expiry.closeExpired();
 
         String eventId = jdbc.sql("SELECT id FROM outbox_event WHERE event_type='ORDER_CLOSED_TIMEOUT'").query(String.class).single();
+        // next_attempt_at 由数据库按 CURRENT_TIMESTAMP 生成，而实测 H2 这个值有 49/50 的概率
+        // 比 JVM 时钟快出微秒级；MessageProcessor 的「没到重试时间就不投」判断会因此偶发地
+        // 整条跳过，通知数变 0——这就是这条用例原来时红时绿的原因。
+        // 这里把重试时间显式拨到过去：要不要投不该取决于两次取时的先后。
+        jdbc.sql("UPDATE outbox_event SET next_attempt_at = :t WHERE id = :id")
+                .param("t", LocalDateTime.now().minusMinutes(1)).param("id", eventId).update();
         processor.process(eventId);
 
         assertThat(count("notification")).isEqualTo(1);
@@ -361,8 +368,21 @@ class OrderExpiryTest {
         return jdbc.sql("SELECT close_reason FROM mall_order WHERE id=:id").param("id", id).query(String.class).single();
     }
 
-    private String eventType() {
-        return jdbc.sql("SELECT event_type FROM outbox_event ORDER BY created_at DESC").query(String.class).list().getFirst();
+    /**
+     * 关单发出的事件类型，按名字点名而不是「取最新一条」。
+     *
+     * <p>原来写成 {@code ORDER BY created_at DESC} 取第一条，是这条用例时红时绿的根源：
+     * {@code outbox_event.created_at} 由数据库按 {@code CURRENT_TIMESTAMP} 生成（插入时不带该列），
+     * 而 <b>H2 会缓存这个值</b>——实测连续 8 次取样返回的是同一个时间戳（仅 1 个不同值）。
+     * 于是「下单」和「关单」两条事件的时间戳完全并列，{@code ORDER BY created_at DESC}
+     * 返回谁并不确定，跟执行时序有关。
+     *
+     * <p>加二级排序键也救不了：主键 {@code id} 是 {@code UUID.randomUUID()} 生成的 UUID，
+     * 不是单调递增的，{@code ORDER BY created_at DESC, id DESC} 在并列时仍然随机。
+     * 这张表也没有任何单调递增的列可用。所以改为按事件类型直接点名计数。
+     */
+    private List<String> eventTypes() {
+        return jdbc.sql("SELECT event_type FROM outbox_event ORDER BY event_type").query(String.class).list();
     }
 
     private int count(String table) {

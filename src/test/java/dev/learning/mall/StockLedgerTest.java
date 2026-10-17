@@ -68,14 +68,28 @@ class StockLedgerTest {
     @Autowired JdbcClient jdbc;
     @Autowired PlatformTransactionManager txManager;
 
+    /**
+     * 重置库存一律走裸 SQL，<b>不走被测的 {@code updateStock}</b>。
+     *
+     * <p>原因：一旦 updateStock 自己坏了（比如流水写错被 CHECK 打回），走它做前置/清理
+     * 会让 5 条用例全部以 {@code setUp/tearDown} 报错的形式一起红，真正的失败点被噪声淹没，
+     * 排查时只看到「全挂了」而看不出是哪一条断言没守住。
+     *
+     * <p>各条用例都自带基线（先记 {@code MAX(id)} 与当前现货），所以不写流水也无所谓。
+     */
     @BeforeEach
     void setUp() {
-        catalog.updateStock(PID, START_STOCK, "test-setup");
+        resetStock();
     }
 
     @AfterEach
     void tearDown() {
-        catalog.updateStock(PID, START_STOCK, "test-cleanup");
+        resetStock();
+    }
+
+    private void resetStock() {
+        jdbc.sql("UPDATE product SET stock = :s WHERE id = :pid")
+                .param("s", START_STOCK).param("pid", PID).update();
     }
 
     @Test
@@ -124,6 +138,26 @@ class StockLedgerTest {
                         + "(product_id, delta, stock_before, stock_after, reason, actor)"
                         + " VALUES (:pid, 1, 10, 11, 'MAGIC', 'tester')").param("pid", PID).update())
                 .hasMessageContaining("CK_LEDGER_REASON");
+    }
+
+    /**
+     * 负数库存不该出现在流水里。
+     *
+     * <p>两行插入都<b>故意让算术成立</b>（{@code 前 + 变化 = 后}），只踩非负这一条：
+     * 否则红的可能是 {@code ck_ledger_arithmetic}，就证明不了非负约束真的在拦。
+     */
+    @Test
+    @DisplayName("流水不记录负数库存：stock_before / stock_after 为负会被 CHECK 拒绝")
+    void ledgerRejectsNegativeStock() {
+        assertThatThrownBy(() -> jdbc.sql("INSERT INTO stock_ledger"
+                        + "(product_id, delta, stock_before, stock_after, reason, actor)"
+                        + " VALUES (:pid, 5, -1, 4, 'RESTOCK', 'tester')").param("pid", PID).update())
+                .hasMessageContaining("CK_LEDGER_STOCK_NONNEG");
+
+        assertThatThrownBy(() -> jdbc.sql("INSERT INTO stock_ledger"
+                        + "(product_id, delta, stock_before, stock_after, reason, actor)"
+                        + " VALUES (:pid, -15, 10, -5, 'RESERVE', 'tester')").param("pid", PID).update())
+                .hasMessageContaining("CK_LEDGER_STOCK_NONNEG");
     }
 
     @Test
