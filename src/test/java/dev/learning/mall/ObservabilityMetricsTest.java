@@ -178,6 +178,43 @@ class ObservabilityMetricsTest {
                 .as("失败的调用不能被记成 OK").isZero();
     }
 
+    /**
+     * 重复调用被短路时也要记 {@code status=DUPLICATE}。
+     *
+     * <p>守的是<b>注册表层的 tag 值</b>（{@code tool.calls{tool,status=DUPLICATE}} 计数 +1），
+     * 而不是「有没有这个指标」——后者在指标改名、tag 写错时依然成立，拦不住任何东西。
+     *
+     * <p>为什么要记：短路掉的调用同样是「模型以为自己拿到了东西但其实没有」。只统计真正
+     * 执行过的调用，会让失败率凭空变好看——这是指标最容易被悄悄做假的那一类漏记。
+     */
+    @Test
+    @DisplayName("重复调用被短路记 DUPLICATE，而不是算进成功")
+    void duplicateCallIsCountedAsDuplicateNotOk() {
+        String args = "{\"keyword\":\"杯\",\"category\":null,\"maxPrice\":null}";
+        double dupBefore = counterValue(AgentLoop.METRIC_TOOL_CALLS, "tool", "searchProducts",
+                "status", AgentLoop.STATUS_DUPLICATE);
+        double okBefore = counterValue(AgentLoop.METRIC_TOOL_CALLS, "tool", "searchProducts",
+                "status", AgentLoop.STATUS_OK);
+
+        // 第一轮真的执行，第二轮参数完全相同 → 被停滞检测短路。
+        properties.getHarness().setMaxSteps(2);
+        ChatModel mock = mock(ChatModel.class);
+        when(mock.chat(any(ChatRequest.class)))
+                .thenReturn(toolTurn(call("r1", "searchProducts", args)));
+        runOneTurn(mock, "有杯子吗");
+
+        // 先把「这次真的短路了」钉死，再看指标：否则指标断言可能只是在验证一次没发生的调用。
+        assertThat(jdbc.sql("SELECT status FROM assistant_run_step ORDER BY step_no")
+                .query(String.class).list()).containsExactly("OK", "DUPLICATE");
+
+        assertThat(counterValue(AgentLoop.METRIC_TOOL_CALLS, "tool", "searchProducts",
+                "status", AgentLoop.STATUS_DUPLICATE) - dupBefore)
+                .as("被短路的那次必须记成 DUPLICATE").isEqualTo(1.0);
+        assertThat(counterValue(AgentLoop.METRIC_TOOL_CALLS, "tool", "searchProducts",
+                "status", AgentLoop.STATUS_OK) - okBefore)
+                .as("短路的那次不能算进成功，否则失败率恒为 0").isEqualTo(1.0);
+    }
+
     // ——————————————————— 3. 首字延迟 ———————————————————
 
     @Test
@@ -258,6 +295,38 @@ class ObservabilityMetricsTest {
         var second = expiry.closeExpired();
         assertThat(second.backlog()).isZero();
         assertThat(backlogGauge()).as("扫完就该归零，不能停留在上一轮的值").isZero();
+    }
+
+    /**
+     * 开关关掉时<b>没有发生扫描</b>，Gauge 必须保留上一轮的值。
+     *
+     * <p>这是本类里唯一一条「断言值不变」的用例，守的是一段刻意什么都不做的代码
+     * （{@link OrderExpiryService} 在 {@code auto-close-enabled=false} 时提前返回、不动 Gauge）。
+     * 这类分支最容易被后来者当成无意义分支删掉，而删掉后故障会被<b>静默隐藏</b>：
+     * 「排障中、没人扫」会被伪装成「积压为 0，一切正常」。
+     *
+     * <p>断言的是 Gauge 的<b>当前读数</b>（应用层持有的值），不牵扯调度时序——
+     * 调度什么时候跑与本条无关，直接调 {@code closeExpired()} 即可。
+     */
+    @Test
+    @DisplayName("没扫描就不更新 Gauge：没测不等于为零")
+    void backlogGaugeKeepsLastValueWhenScanDisabled() {
+        orderProperties.setAutoCloseEnabled(true);
+        orderProperties.setAutoCloseMaxPerScan(1);
+        newExpiredOrder();
+        newExpiredOrder();
+
+        var first = expiry.closeExpired();
+        assertThat(first.backlog()).isEqualTo(1);
+        assertThat(backlogGauge()).as("先让 Gauge 停在一个非零值上").isEqualTo(1.0);
+
+        // 关掉开关：这一轮没有扫描发生，积压量是「没测」而不是「为零」。
+        orderProperties.setAutoCloseEnabled(false);
+        var disabled = expiry.closeExpired();
+        assertThat(disabled.candidates()).as("开关关掉后确实一笔都没扫").isZero();
+        assertThat(backlogGauge())
+                .as("没扫描不能把 Gauge 写成 0：那会把「排障中没人扫」伪装成「积压为 0，一切正常」")
+                .isEqualTo(1.0);
     }
 
     // ——————————————————— 读指标的工具 ———————————————————
