@@ -12,6 +12,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
+import org.springframework.security.web.util.matcher.OrRequestMatcher;
 
 @Configuration
 public class SecurityConfig {
@@ -44,10 +45,15 @@ public class SecurityConfig {
             .formLogin(login -> login.loginPage("/login").defaultSuccessUrl("/", true).permitAll())
             .logout(logout -> logout.logoutSuccessUrl("/"))
             .exceptionHandling(errors -> errors
+                // /api/** 与 /actuator/** 都是「机器读的 JSON」，未登录就给 401 + JSON，
+                // 而不是把调用方重定向到登录页（302 + HTML 对这些端点毫无意义，
+                // 还会让监控脚本把「登录页 200」误判成「指标接口正常」）。
+                // 注意这里只换**入口**（怎么拒绝），不动上面的授权规则（要不要登录）。
                 .defaultAuthenticationEntryPointFor((req, res, ex) -> {
                     res.setStatus(401); res.setContentType("application/json;charset=UTF-8");
                     res.getWriter().write("{\"code\":\"UNAUTHENTICATED\",\"message\":\"请先登录\"}");
-                }, new AntPathRequestMatcher("/api/**"))
+                }, new OrRequestMatcher(new AntPathRequestMatcher("/api/**"),
+                        new AntPathRequestMatcher("/actuator/**")))
                 .accessDeniedHandler((req, res, ex) -> {
                     res.setStatus(403); res.setContentType("application/json;charset=UTF-8");
                     res.getWriter().write("{\"code\":\"FORBIDDEN\",\"message\":\"请求校验失败，请刷新页面后重试\"}");

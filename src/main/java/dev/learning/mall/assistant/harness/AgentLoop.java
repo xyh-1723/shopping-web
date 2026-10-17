@@ -17,6 +17,8 @@ import dev.langchain4j.model.chat.StreamingChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.chat.response.StreamingChatResponseHandler;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import jakarta.annotation.PreDestroy;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -80,6 +82,15 @@ public class AgentLoop {
     public static final String STATUS_DENIED = "DENIED";
     public static final String STATUS_DUPLICATE = "DUPLICATE";
     public static final String STATUS_TIMEOUT = "TIMEOUT";
+
+    /** 指标：一轮的停止原因（Counter，标签 reason=STOP_*）。 */
+    public static final String METRIC_STOP = "mall.assistant.stop";
+    /** 指标：工具调用结果（Counter，标签 tool / status）。 */
+    public static final String METRIC_TOOL_CALLS = "mall.assistant.tool.calls";
+    /** 指标：从一轮开始到收到第一个字的延迟（Timer，带 p95）。 */
+    public static final String METRIC_FIRST_TOKEN = "mall.assistant.first.token.latency";
+    /** 指标：整轮耗时（Timer，标签 stop=STOP_*）。 */
+    public static final String METRIC_TURN_DURATION = "mall.assistant.turn.duration";
 
     private static final Logger log = LoggerFactory.getLogger(AgentLoop.class);
 
@@ -155,15 +166,29 @@ public class AgentLoop {
      * 拿不到就退化成顺序执行——见 {@link #invokeAll} 的说明。
      */
     private final Semaphore parallelPermits;
+    /** 指标注册表。四项助手指标都从这里出去。 */
+    private final MeterRegistry registry;
+    /**
+     * 首字延迟的 Timer。在构造期注册一次：百分位直方图（p95）必须在<b>首次创建</b>时配置，
+     * 之后再用别的 Builder 注册同名 meter 是拿不到直方图的（注册表会返回已有实例）。
+     */
+    private final Timer firstTokenLatency;
 
     public AgentLoop(ToolRegistry toolRegistry, ObjectMapper json, AssistantAudit audit,
                      AssistantProperties properties, OutputGuard outputGuard,
-                     Optional<StreamingChatModel> streamingModel) {
+                     Optional<StreamingChatModel> streamingModel, MeterRegistry registry) {
         this.toolRegistry = toolRegistry;
         this.json = json;
         this.audit = audit;
         this.outputGuard = outputGuard;
         this.streamingModel = streamingModel == null ? Optional.empty() : streamingModel;
+        this.registry = registry;
+        // 首字延迟是「用户等多久才看到第一个字」，分布比均值重要得多：
+        // 均值好看但 p95 难看，就意味着每 20 个用户里有 1 个在干等。
+        this.firstTokenLatency = Timer.builder(METRIC_FIRST_TOKEN)
+                .description("一轮对话从开始到收到模型第一个字的延迟")
+                .publishPercentiles(0.95)
+                .register(registry);
         int permits = Math.max(1, properties.getHarness().getMaxParallelTools());
         this.parallelPermits = new Semaphore(permits, true);
         AtomicInteger n = new AtomicInteger();
@@ -278,6 +303,12 @@ public class AgentLoop {
                     "AGENT_" + stopReason, "LLM06",
                     "执行循环未正常结束：" + stopReason + "，已调用工具 " + toolsUsed);
         }
+        // —— 指标：停止原因与整轮耗时 ——
+        // 前者回答「有多少轮没答完、卡在哪」，后者回答「是不是在变慢」。
+        // 轨迹表（assistant_run_trace）只能靠 SQL count 事后统计，没有时序，也聚合不出趋势。
+        registry.counter(METRIC_STOP, "reason", stopReason).increment();
+        registry.timer(METRIC_TURN_DURATION, "stop", stopReason)
+                .record(wall, TimeUnit.MILLISECONDS);
         return new Outcome(text, fallbackFor(stopReason, steps, bundle), stopReason,
                 List.copyOf(steps), List.copyOf(toolOutputs), List.copyOf(toolsUsed), wall);
     }
@@ -307,7 +338,8 @@ public class AgentLoop {
         AtomicReference<ChatResponse> completed = new AtomicReference<>();
         AtomicReference<Throwable> failure = new AtomicReference<>();
         streamingModel.get().chat(request,
-                new TokenStreamer(progress, outputGuard, latch, completed, failure));
+                new TokenStreamer(progress, outputGuard, latch, completed, failure,
+                        firstTokenLatency, startNanos));
 
         long remaining = Math.max(1_000L, budget.timeoutMs() - elapsedMs(startNanos));
         try {
@@ -346,21 +378,38 @@ public class AgentLoop {
         private final CountDownLatch latch;
         private final AtomicReference<ChatResponse> completed;
         private final AtomicReference<Throwable> failure;
+        /**
+         * 首字延迟的 Timer 与<b>本轮开始时刻</b>。
+         *
+         * <p>起点必须是整轮的开始，而不是「发起流式请求」的时刻：用户感知的等待
+         * 从他按下发送键算起，中间的守卫、上下文组装都算在他的体感里。
+         */
+        private final Timer firstTokenLatency;
+        private final long turnStartNanos;
         private final StringBuilder buffer = new StringBuilder();
         private volatile boolean stopped;
+        /** 只记第一次：之后每个字都记一遍就把「首字延迟」变成了「平均字间隔」。 */
+        private volatile boolean firstTokenRecorded;
 
         TokenStreamer(TurnListener progress, OutputGuard guard, CountDownLatch latch,
-                      AtomicReference<ChatResponse> completed, AtomicReference<Throwable> failure) {
+                      AtomicReference<ChatResponse> completed, AtomicReference<Throwable> failure,
+                      Timer firstTokenLatency, long turnStartNanos) {
             this.progress = progress;
             this.guard = guard;
             this.latch = latch;
             this.completed = completed;
             this.failure = failure;
+            this.firstTokenLatency = firstTokenLatency;
+            this.turnStartNanos = turnStartNanos;
         }
 
         @Override
         public void onPartialResponse(String token) {
             if (token == null || token.isEmpty()) return;
+            if (!firstTokenRecorded) {
+                firstTokenRecorded = true;
+                firstTokenLatency.record(elapsedMs(turnStartNanos), TimeUnit.MILLISECONDS);
+            }
             if (stopped) return; // 已经判定不安全：后续增量一个都不再往外送
             buffer.append(token);
             if (guard != null && guard.wouldFlag(buffer.toString())) {
@@ -413,6 +462,7 @@ public class AgentLoop {
                 notifySafely(listener, () -> listener.onToolStart(req.name(), clip(req.arguments(), 160)));
                 results.set(i, ToolRun.verbatim(duplicateNotice(req.name()), STATUS_DUPLICATE));
                 notifySafely(listener, () -> listener.onToolEnd(req.name(), STATUS_DUPLICATE, 0L));
+                recordToolCall(req.name(), STATUS_DUPLICATE);
             } else if (bundle.isEffectful(req.name()) || !parallelPermits.tryAcquire()) {
                 // 效果型工具：留在调用线程，保住轮次上下文，且不与其他调用并发。
                 // 只读工具但预算已满：同样在调用线程执行（降级，见方法注释）。
@@ -444,8 +494,10 @@ public class AgentLoop {
             }
             for (int i = 0; i < results.size(); i++) {
                 if (results.get(i) == null) {
+                    String tool = requests.get(i).name();
                     results.set(i, ToolRun.verbatim(
-                            timeoutNotice(requests.get(i).name(), budget.timeoutMs()), STATUS_TIMEOUT));
+                            timeoutNotice(tool, budget.timeoutMs()), STATUS_TIMEOUT));
+                    recordToolCall(tool, STATUS_TIMEOUT);
                 }
             }
         }
@@ -471,10 +523,26 @@ public class AgentLoop {
         long latency = (System.nanoTime() - t0) / 1_000_000L;
         // 取成 final 局部量再进 lambda：execution 在 try/catch 两处赋值，本身不是「实际上的最终变量」。
         String status = execution.status();
+        // 工具成功率是「工具好不好用」唯一的量化入口：失败率突然抬头通常是外部依赖变了，
+        // 而不是模型变笨了。记在 status 真正定下来的这一行，而不是上面那句 catch 里——
+        // 后者会漏掉 ToolRegistry 自己转成结构化错误的那些失败。
+        recordToolCall(req.name(), status);
         notifySafely(listener, () -> listener.onToolEnd(req.name(), status, latency));
         String forModel = truncate(execution.text(), budget.maxToolResultChars());
         return new ToolRun(execution.text(), forModel, execution.status(), latency,
                 forModel.length() != execution.text().length());
+    }
+
+    /**
+     * 记一次工具调用的结果。
+     *
+     * <p>工具的每次调用都记，包括<b>没有真正执行</b>的那两次：重复调用被短路（{@code DUPLICATE}）
+     * 和并行批次超时（{@code TIMEOUT}）。它们同样是「模型以为自己拿到了东西但其实没有」，
+     * 只统计真正执行过的调用，会让失败率凭空变好看。
+     */
+    private void recordToolCall(String toolName, String status) {
+        registry.counter(METRIC_TOOL_CALLS, "tool", toolName == null ? "unknown" : toolName,
+                "status", status).increment();
     }
 
     /**

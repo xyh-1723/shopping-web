@@ -28,7 +28,9 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        # metrics 是四项运营指标（mall.* ）的查询入口；它受 SecurityConfig 的
+        # anyRequest().authenticated() 保护，未登录拿不到（运营数据不外露）。
+        include: health,info,metrics
   endpoint:
     health:
       show-details: never
