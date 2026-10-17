@@ -80,10 +80,21 @@ public class OrderRepository {
         return jdbc.sql("SELECT product_id,product_name,unit_price,quantity FROM order_item WHERE order_id=:id ORDER BY product_id")
                 .param("id", id).query(OrderView.Item.class).list();
     }
-    /** 返回影响行数：1 表示这次支付真的发生了。 */
-    int markPaid(String id, String method, String receipt) {
-        return jdbc.sql("UPDATE mall_order SET status='PAID',payment_method=:method,payment_receipt=:receipt WHERE id=:id AND status='PENDING'")
-                .param("id", id).param("method", method).param("receipt", receipt).update();
+    /**
+     * 返回影响行数：1 表示这次支付真的发生了。
+     *
+     * <p>{@code paidAt} 由调用方传入而不是写 {@code CURRENT_TIMESTAMP}：与
+     * {@link #markClosed(String, String, LocalDateTime)} 同一个形状——时间可注入，
+     * 测试用可控 {@code Clock} 就能断言「退款窗口从哪个时刻起算」，不用等真实时间。
+     *
+     * <p>这一列是<b>被数据库逼着写的</b>：V15 的 {@code ck_order_paid_needs_moment}
+     * 要求 {@code status='PAID'} 的行必须有 {@code paid_at}，漏写就是支付当场被打回。
+     */
+    int markPaid(String id, String method, String receipt, LocalDateTime paidAt) {
+        return jdbc.sql("UPDATE mall_order SET status='PAID',payment_method=:method,payment_receipt=:receipt,"
+                        + "paid_at=:paidAt WHERE id=:id AND status='PENDING'")
+                .param("id", id).param("method", method).param("receipt", receipt)
+                .param("paidAt", paidAt).update();
     }
     /**
      * 关单。<b>带前置条件</b>是这里的关键：只有 {@code status='PENDING'} 的行会被更新。
@@ -99,6 +110,8 @@ public class OrderRepository {
     OrderView view(OrderRow row) {
         return new OrderView(row.id(), row.status(), row.total(), row.subtotal(), row.discount(),
                 row.shippingFee(), row.payAmount(), row.paymentMethod(), row.paymentReceipt(),
-                row.createdAt(), items(row.id()), row.expiresAt(), row.closeReason(), row.closedAt());
+                row.createdAt(), items(row.id()), row.expiresAt(), row.closeReason(), row.closedAt(),
+                row.paidAt(), row.fulfillmentStatus(), row.shippedAt(), row.shippingNo(),
+                row.receivedAt(), row.completedAt());
     }
 }

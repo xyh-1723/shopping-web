@@ -96,7 +96,9 @@ public class OrderTransactions implements OrderCancellation {
         String receipt = gateway.pay(id, row.total());
         // 带条件的更新：真被支付成功的只有一次。理论上行锁已经串行化了这里，
         // 但「谁改成了 PAID 谁负责」这条规则不该依赖调用方记得加锁。
-        if (orders.markPaid(id, method, receipt) != 1) throw notPayable(orders.lock(id).orElse(row));
+        // 支付时刻与关单时刻同一个形状：由 Clock 注入，退款窗口、对账才有确定的起点。
+        LocalDateTime paidAt = LocalDateTime.now(clock);
+        if (orders.markPaid(id, method, receipt, paidAt) != 1) throw notPayable(orders.lock(id).orElse(row));
         events.publish(id, user, "ORDER_PAID", "模拟支付成功，订单 " + id.substring(0, 8) + " 已完成。");
         return get(id, user);
     }
