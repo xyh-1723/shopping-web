@@ -246,7 +246,7 @@ class OrderExpiryTest {
         // 所以连「把它改成抛异常」这一步也得先待在事务里：否则事务代理会先把它挡下，
         // 桩只设了一半——下一次调用这个 spy 就会静默返回 null，比报错更难查。
         new TransactionTemplate(txManager).executeWithoutResult(status ->
-                doThrow(new IllegalStateException("库存服务不可用")).when(catalog).release(anyLong(), anyInt()));
+                doThrow(new IllegalStateException("库存服务不可用")).when(catalog).release(anyLong(), anyInt(), any(), any()));
 
         at(BASE.plusMinutes(15));
         var result = expiry.closeExpired();

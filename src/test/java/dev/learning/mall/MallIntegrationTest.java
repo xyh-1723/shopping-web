@@ -207,7 +207,7 @@ class MallIntegrationTest {
         assertThat(eventStatus(id)).isEqualTo("DELIVERED"); assertThat(count("notification")).isEqualTo(1);
     }
     @Test void inventoryWriteRequiresAnExistingTransaction() {
-        assertThatThrownBy(() -> products.reserve(1,1)).isInstanceOf(org.springframework.transaction.IllegalTransactionStateException.class);
+        assertThatThrownBy(() -> products.reserve(1,1,"student",null)).isInstanceOf(org.springframework.transaction.IllegalTransactionStateException.class);
     }
     private <T> List<T> parallel(int count, IntFunction<T> action) throws Exception {
         try (var pool = Executors.newFixedThreadPool(count)) {

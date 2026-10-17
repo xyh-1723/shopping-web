@@ -7,6 +7,7 @@ import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import java.math.BigDecimal;
+import java.security.Principal;
 import java.util.List;
 import org.springframework.web.bind.annotation.*;
 
@@ -34,8 +35,13 @@ public class ProductController {
         return catalog.updatePrice(id, request.price());
     }
 
+    /**
+     * 补货账号取自 {@link Principal} 而不是请求体：请求体是客户端给的，可以被伪造，
+     * 而「谁补的货」是要进库存流水留痕的——留痕的第一要求是它不可抵赖。
+     */
     @PostMapping("/{id}/stock")
-    public ProductView updateStock(@PathVariable long id, @Valid @RequestBody StockRequest request) {
-        return catalog.updateStock(id, request.stock());
+    public ProductView updateStock(@PathVariable long id, Principal principal,
+            @Valid @RequestBody StockRequest request) {
+        return catalog.updateStock(id, request.stock(), principal == null ? null : principal.getName());
     }
 }

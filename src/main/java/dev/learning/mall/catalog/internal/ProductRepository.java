@@ -28,4 +28,19 @@ class ProductRepository {
     void setStock(long id, int stock) {
         jdbc.sql("UPDATE product SET stock = :stock WHERE id = :id").param("stock", stock).param("id", id).update();
     }
+
+    /**
+     * 取当前库存并加行锁：保证「读到的前值」与接下来的写入之间无人插队。
+     *
+     * <p>为什么必须先锁再读：流水要记 {@code stock_before}，而这个前值只有在「读与写中间
+     * 没有别人插队」时才成立。若改成「写完再读一次」，另一个事务可能在中间改过库存，
+     * 于是 {@code before + delta ≠ after}，{@code ck_ledger_arithmetic} 会把整笔事务打回——
+     * 那是一次响亮的误报：库存明明是对的，只是前值记脏了。
+     *
+     * <p>调用方必须已经在事务里（reserve / release 标了 MANDATORY，updateStock 自带事务）。
+     */
+    int stockForUpdate(long id) {
+        return jdbc.sql("SELECT stock FROM product WHERE id = :id FOR UPDATE")
+                .param("id", id).query(Integer.class).single();
+    }
 }

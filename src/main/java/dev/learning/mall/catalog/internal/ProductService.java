@@ -16,11 +16,17 @@ public class ProductService implements ProductCatalog {
     private static final BigDecimal MIN_PRICE = new BigDecimal("0.01");
     private static final BigDecimal MAX_PRICE = new BigDecimal("99999.00");
 
+    /** actor 列为 NOT NULL：拿不到操作者时用它占位，而不是让整笔事务被数据库拒掉。 */
+    private static final String ACTOR_UNKNOWN = "unknown";
+
     private final ProductRepository repository;
+    private final StockLedgerRepository ledger;
     private final ApplicationEventPublisher events;
 
-    public ProductService(ProductRepository repository, ApplicationEventPublisher events) {
+    public ProductService(ProductRepository repository, StockLedgerRepository ledger,
+            ApplicationEventPublisher events) {
         this.repository = repository;
+        this.ledger = ledger;
         this.events = events;
     }
 
@@ -58,14 +64,26 @@ public class ProductService implements ProductCatalog {
      * <p>只有「从 0 变到有货」才会真正触发补货提醒，判断交给订阅方——
      * 商品模块只负责说「库存变了」。这条边界让「什么算补货」这种业务口径
      * 只存在于一个地方。
+     *
+     * <p>流水记在这里而不是调用方：全项目改 {@code product.stock} 的入口只有
+     * {@link #reserve} / {@link #release} / 本方法三个，其中<b>补货最容易漏</b>——
+     * 它不走订单，写在订单模块里根本记不到。而补货恰恰是最需要对账的变动：
+     * 少了它，「现货 == 流水之和」这条恒等式会凭空少掉一大块。
      */
     @Transactional
-    public ProductView updateStock(long productId, int stock) {
+    public ProductView updateStock(long productId, int stock, String actor) {
         if (stock < 0 || stock > 9999) {
             throw BusinessException.badRequest("INVALID_STOCK", "库存必须在 0 到 9999 之间");
         }
         ProductView before = get(productId);
+        int beforeStock = repository.stockForUpdate(productId);
         repository.setStock(productId, stock);
+        // 无变化就不写流水：delta = 0 的行会被 ck_ledger_delta_nonzero 拒绝，
+        // 在这里挡掉比让数据库抛异常更诚实（这不是错误，只是没发生）。
+        if (beforeStock != stock) {
+            ledger.append(productId, stock - beforeStock, beforeStock, stock,
+                    StockReason.RESTOCK, actor(actor), null);
+        }
         ProductView after = get(productId);
         if (before.stock() != after.stock()) {
             events.publishEvent(new ProductChangedEvent(productId, ProductChangedEvent.Change.STOCK));
@@ -73,15 +91,35 @@ public class ProductService implements ProductCatalog {
         return after;
     }
 
+    /**
+     * 预占库存：库存不足直接抛 {@code OUT_OF_STOCK}，调用方的事务整体回滚。
+     *
+     * <p>先加行锁读前值、再条件扣减、最后留痕——三步在同一个事务里，
+     * 于是「扣减成功却没有流水」和「有流水却没扣成」都不可能存在。
+     */
     @Transactional(propagation = Propagation.MANDATORY)
-    public void reserve(long id, int quantity) {
+    public void reserve(long id, int quantity, String actor, String orderId) {
         if (quantity <= 0) throw new IllegalArgumentException("quantity must be positive");
+        int before = repository.stockForUpdate(id);
         if (repository.deduct(id, quantity) != 1)
             throw BusinessException.conflict("OUT_OF_STOCK", "库存不足，请减少数量或换一件商品");
+        ledger.append(id, -quantity, before, before - quantity, StockReason.RESERVE, actor(actor), orderId);
     }
+
+    /** 归还库存（取消 / 超时关单）。与 {@link #reserve} 严格对称。 */
     @Transactional(propagation = Propagation.MANDATORY)
-    public void release(long id, int quantity) {
+    public void release(long id, int quantity, String actor, String orderId) {
         if (quantity <= 0) throw new IllegalArgumentException("quantity must be positive");
+        int before = repository.stockForUpdate(id);
         repository.restore(id, quantity);
+        ledger.append(id, quantity, before, before + quantity, StockReason.RELEASE, actor(actor), orderId);
+    }
+
+    /**
+     * 归一化操作者：流水要能回答「谁动的」，拿不到时宁可写 unknown，
+     * 也不要让 NOT NULL 约束把一笔已经扣成功的库存变更连带回滚。
+     */
+    private static String actor(String actor) {
+        return actor == null || actor.isBlank() ? ACTOR_UNKNOWN : actor;
     }
 }

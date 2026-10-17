@@ -61,8 +61,10 @@ public class OrderTransactions implements OrderCancellation {
         orders.insert(id, user, key, hash, quote.subtotal(), quote.discount(), quote.shippingFee(),
                 quote.payable(), expiresAt);
         // lines 已按商品编号排序，多个订单以相同顺序加库存行锁，降低死锁风险。
+        // 下单者用户名与订单号一起交给商品模块：它们会被写进库存流水，
+        // 于是「这批货是被哪笔订单占走的」事后可查，不用反推。
         for (OrderView.Item item : items) {
-            catalog.reserve(item.productId(), item.quantity());
+            catalog.reserve(item.productId(), item.quantity(), user, id);
             orders.insertItem(id, item);
         }
         // 订单、库存、事件在同一数据库事务中提交或回滚。
@@ -136,7 +138,8 @@ public class OrderTransactions implements OrderCancellation {
         // 更新影响 0 行 = 别人已经处理过，此刻绝不能再还一次库存（重复归还会凭空造出货）。
         if (orders.markClosed(row.id(), reason, LocalDateTime.now(clock)) != 1) return false;
         List<OrderView.Item> lines = orders.items(row.id());
-        for (OrderView.Item item : lines) catalog.release(item.productId(), item.quantity());
+        for (OrderView.Item item : lines)
+            catalog.release(item.productId(), item.quantity(), row.username(), row.id());
         boolean timeout = REASON_TIMEOUT.equals(reason);
         if (timeout) {
             // 超时关闭是「弃单挽回」的入口：用户多半是忘了或卡在支付上，值得再提醒一句。

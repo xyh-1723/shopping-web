@@ -7,8 +7,19 @@ import java.util.List;
 public interface ProductCatalog {
     List<ProductView> list();
     ProductView get(long id);
-    void reserve(long productId, int quantity);
-    void release(long productId, int quantity);
+
+    /**
+     * 预占库存（下单时）。
+     *
+     * @param actor   谁动的（下单者用户名），进流水 {@code actor} 列
+     * @param orderId 关联订单号，进流水 {@code order_id} 列；非订单场景传 {@code null}
+     */
+    void reserve(long productId, int quantity, String actor, String orderId);
+
+    /**
+     * 归还库存（取消 / 超时关单时）。参数含义同 {@link #reserve}。
+     */
+    void release(long productId, int quantity, String actor, String orderId);
 
     /**
      * 改价（仅店员可用，权限在 Web 层与 SecurityConfig 双重限制）。
@@ -18,6 +29,10 @@ public interface ProductCatalog {
      */
     ProductView updatePrice(long productId, BigDecimal price);
 
-    /** 改库存（上架 / 补货）。同样仅店员可用。 */
-    ProductView updateStock(long productId, int stock);
+    /**
+     * 改库存（上架 / 补货）。同样仅店员可用。
+     *
+     * @param actor 操作的店员账号，进流水 {@code actor} 列（补货没有关联订单，{@code order_id} 为 null）
+     */
+    ProductView updateStock(long productId, int stock, String actor);
 }
