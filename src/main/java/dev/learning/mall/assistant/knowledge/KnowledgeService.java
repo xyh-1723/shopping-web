@@ -67,10 +67,10 @@ public class KnowledgeService {
         ensureReady();
         Embedding queryEmbedding = embeddingModel.embed(query.strip()).content();
 
-        // —— 第 1 道：检索层租户隔离。顾客只查公开库，店员两个库都查。 ——
+        // —— 第 1 道：检索层租户隔离。顾客只查公开库，经营侧（店员 / 商家）两个库都查。 ——
         List<EmbeddingMatch<TextSegment>> matches = new ArrayList<>(
                 publicStore.search(request(queryEmbedding)).matches());
-        if (actor.isStaff()) {
+        if (actor.isOperatingSide()) {
             matches.addAll(staffStore.search(request(queryEmbedding)).matches());
         }
 
@@ -78,7 +78,7 @@ public class KnowledgeService {
         for (EmbeddingMatch<TextSegment> match : matches) {
             String visibility = match.embedded().metadata().getString("visibility");
             // —— 第 2 道：后置租户过滤。库选错了也漏不出去，且留下痕迹。 ——
-            if (!actor.isStaff() && KnowledgeSegment.STAFF.equals(visibility)) {
+            if (!actor.isOperatingSide() && KnowledgeSegment.STAFF.equals(visibility)) {
                 audit.record(username, null, AssistantAudit.STAGE_RAG, "DENY",
                         "RAG_TENANT_FILTER", "LLM02", match.embedded().text());
                 continue;

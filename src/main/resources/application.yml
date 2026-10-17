@@ -36,6 +36,8 @@ management:
       show-details: never
 mall:
   demo-password: ${MALL_DEMO_PASSWORD:learn12345}
+  # 商家账号独立密码：与上面的演示账号分开，避免「任何人都能用演示密码登录商家后台审批退款」。
+  merchant-password: ${MALL_MERCHANT_PASSWORD:merchant12345}
   # 促销与运费。这是全系统唯一的金额计算入口：购物袋页面、下单、助手对话三处共用，
   # 因此「对话里说减 10，结算只减 5」这类事故在结构上不可能发生。
   shopping:

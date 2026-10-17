@@ -20,12 +20,18 @@ public class SecurityConfig {
     PasswordEncoder passwordEncoder() { return new BCryptPasswordEncoder(); }
 
     @Bean
-    UserDetailsService users(PasswordEncoder encoder, @Value("${mall.demo-password}") String password) {
+    UserDetailsService users(PasswordEncoder encoder,
+                             @Value("${mall.demo-password}") String password,
+                             @Value("${mall.merchant-password}") String merchantPassword) {
         return new InMemoryUserDetailsManager(
                 User.withUsername("student").password(encoder.encode(password)).roles("USER").build(),
                 User.withUsername("classmate").password(encoder.encode(password)).roles("USER").build(),
-                // 店员账号：演示「同一助手、不同权限」。密码默认与演示账号一致，可用 MALL_STAFF_PASSWORD 覆盖。
-                User.withUsername("admin").password(encoder.encode(password)).roles("USER", "STAFF").build());
+                // 店员账号：演示「同一助手、不同权限」。密码与演示账号共用一份 ${mall.demo-password}。
+                User.withUsername("admin").password(encoder.encode(password)).roles("USER", "STAFF").build(),
+                // 商家账号：经营决策方（退款审批的归属角色）。刻意不带 STAFF——
+                // 它能做什么由「MERCHANT」这一个角色说了算，日常运营执行权不下发。
+                User.withUsername("merchant").password(encoder.encode(merchantPassword))
+                        .roles("USER", "MERCHANT").build());
     }
 
     @Bean
