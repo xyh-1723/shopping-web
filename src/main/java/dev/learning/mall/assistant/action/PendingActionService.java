@@ -13,6 +13,7 @@ import dev.learning.mall.order.api.OrderCheckout;
 import dev.learning.mall.order.api.OrderInsights;
 import dev.learning.mall.order.api.OrderPayments;
 import dev.learning.mall.order.api.OrderView;
+import dev.learning.mall.order.api.QuoteSnapshot;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -64,14 +65,15 @@ public class PendingActionService {
 
     private record ActionRow(String id, String username, String conversationId, String kind,
                              String orderId, BigDecimal amount, String method, String status,
-                             String idempotencyKey, String linesJson, LocalDateTime expiresAt) {}
+                             String idempotencyKey, String linesJson, String quoteId,
+                             LocalDateTime expiresAt) {}
 
     /** 确认/取消的结果：动作最新视图 + 执行后的订单（未产生订单变更时为 null）。 */
     public record Resolution(PendingActionView action, OrderView order) {}
 
     private static final String SELECT =
             "SELECT id, username, conversation_id, kind, order_id, amount, payment_method AS method, "
-                    + "status, idempotency_key, lines_json, expires_at "
+                    + "status, idempotency_key, lines_json, quote_id, expires_at "
                     + "FROM assistant_pending_action ";
 
     private final JdbcClient jdbc;
@@ -79,6 +81,7 @@ public class PendingActionService {
     private final OrderPayments payments;
     private final OrderCheckout checkout;
     private final OrderCancellation cancellation;
+    private final QuoteSnapshot quotes;
     private final AssistantSecurityProperties security;
     private final AssistantAudit audit;
     private final ObjectMapper json;
@@ -86,7 +89,7 @@ public class PendingActionService {
     private final ObjectProvider<PendingActionService> self;
 
     public PendingActionService(JdbcClient jdbc, OrderInsights insights, OrderPayments payments,
-                                OrderCheckout checkout, OrderCancellation cancellation,
+                                OrderCheckout checkout, OrderCancellation cancellation, QuoteSnapshot quotes,
                                 AssistantSecurityProperties security, AssistantAudit audit,
                                 ObjectMapper json, ObjectProvider<PendingActionService> self) {
         this.jdbc = jdbc;
@@ -94,6 +97,7 @@ public class PendingActionService {
         this.payments = payments;
         this.checkout = checkout;
         this.cancellation = cancellation;
+        this.quotes = quotes;
         this.security = security;
         this.audit = audit;
         this.json = json;
@@ -186,24 +190,28 @@ public class PendingActionService {
      * <p>幂等键在这里由服务端生成并落库：模型物理上没有传值入口，
      * 也就无法用构造出来的键绕过防重。确认时原样取出交给订单模块。
      */
-    public PendingActionView requestOrderCreate(String username, List<CreateOrderRequest.Line> lines,
-                                                BigDecimal amount) {
+    public PendingActionView requestOrderCreate(String username, List<CreateOrderRequest.Line> lines) {
         if (lines == null || lines.isEmpty()) {
             throw BusinessException.badRequest("CART_EMPTY", "购物袋是空的，先挑几件商品再来下单");
         }
+        // 金额由服务端快照产出，调用方只能提交商品与数量。确认卡片与之后的
+        // PRICE_CHANGED 比对因此引用同一张快照，不存在两个金额来源。
+        QuoteSnapshot.Snapshot snapshot = quotes.capture(username, lines);
+        BigDecimal amount = snapshot.quote().payable();
         String key = "ord-" + UUID.randomUUID().toString().replace("-", "");
         String conversationId = TurnScope.conversationId();
         String id = UUID.randomUUID().toString();
         LocalDateTime expires = LocalDateTime.now().plusMinutes(security.getPaymentConfirmTtlMinutes());
         jdbc.sql("INSERT INTO assistant_pending_action(id,username,conversation_id,kind,"
-                        + "idempotency_key,lines_json,amount,status,expires_at) "
-                        + "VALUES(:id,:user,:conv,:kind,:key,:lines,:amount,'PENDING',:expires)")
+                        + "idempotency_key,lines_json,quote_id,amount,status,expires_at) "
+                        + "VALUES(:id,:user,:conv,:kind,:key,:lines,:quoteId,:amount,'PENDING',:expires)")
                 .param("id", id)
                 .param("user", username)
                 .param("conv", conversationId)
                 .param("kind", KIND_ORDER_CREATE)
                 .param("key", key)
                 .param("lines", writeLines(lines))
+                .param("quoteId", snapshot.id())
                 .param("amount", amount)
                 .param("expires", expires)
                 .update();
@@ -321,7 +329,7 @@ public class PendingActionService {
                     // 清袋不再由这里做：订单落库会发 OrderPlacedEvent，购物袋自己来听。
                     // 于是页面路径与助手路径共用同一份「落单即清袋」，不会再分叉。
                     OrderView created = checkout.create(username, row.idempotencyKey(),
-                            new CreateOrderRequest(readLines(row.linesJson())));
+                            new CreateOrderRequest(readLines(row.linesJson()), row.quoteId()));
                     audit.record(username, row.conversationId(), AssistantAudit.STAGE_TOOL, "CONFIRM",
                             "HITL_ORDER_CONFIRM", "LLM06",
                             "本人确认下单：订单 " + created.id().substring(0, 8) + "，应付 ¥" + row.amount());

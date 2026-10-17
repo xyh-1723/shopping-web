@@ -9,7 +9,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 @Repository
-class OrderRepository {
+public class OrderRepository {
     private final JdbcClient jdbc;
     OrderRepository(JdbcClient jdbc) { this.jdbc = jdbc; }
     Optional<OrderRow> byKey(String user, String key) {
@@ -61,7 +61,7 @@ class OrderRepository {
      * 「历史列 = 应付」这条不变量因此不可能漂移，也就能被 SQL 断言直接检查。
      * 这是唯一一处写这两列的地方，别在别处补写。
      */
-    void insert(String id, String user, String key, String hash, BigDecimal subtotal, BigDecimal discount,
+    public void insert(String id, String user, String key, String hash, BigDecimal subtotal, BigDecimal discount,
                 BigDecimal shippingFee, BigDecimal payAmount, LocalDateTime expiresAt) {
         jdbc.sql("""
                         INSERT INTO mall_order(id,username,idempotency_key,request_hash,total,

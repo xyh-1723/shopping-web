@@ -2,6 +2,7 @@ package dev.learning.mall.order.internal;
 
 import dev.learning.mall.common.BusinessException;
 import dev.learning.mall.order.api.*;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -16,8 +17,12 @@ import org.springframework.stereotype.Service;
 public class OrderFacade implements OrderCheckout {
     private final OrderRepository orders;
     private final OrderTransactions transactions;
-    public OrderFacade(OrderRepository orders, OrderTransactions transactions) {
-        this.orders = orders; this.transactions = transactions;
+    private final QuoteSnapshot quotes;
+
+    public OrderFacade(OrderRepository orders, OrderTransactions transactions, QuoteSnapshot quotes) {
+        this.orders = orders;
+        this.transactions = transactions;
+        this.quotes = quotes;
     }
     // 特意不加 @Transactional：唯一键异常必须先从另一个 Bean 的事务中退出并回滚，再查询旧订单。
     @Override
@@ -34,8 +39,13 @@ public class OrderFacade implements OrderCheckout {
         String hash = hash(canonical);
         var existing = orders.byKey(user, key);
         if (existing.isPresent()) return replay(existing.get(), hash);
+        // 拿不到快照（未提交、已过期或属于他人）时保持向后兼容，不阻断下单。
+        // 快照只保护用户免受静默改价，不承担鉴权职责。
+        BigDecimal expectedPayable = quotes.find(request.quoteId(), user)
+                .map(snapshot -> snapshot.quote().payable())
+                .orElse(null);
         try {
-            return transactions.create(user, key, hash, lines);
+            return transactions.create(user, key, hash, lines, expectedPayable);
         } catch (DuplicateKeyException conflict) {
             OrderRow row = orders.byKey(user, key).orElseThrow(() -> conflict);
             return replay(row, hash);

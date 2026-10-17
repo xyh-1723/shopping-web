@@ -23,6 +23,7 @@ function read(key, fallback) {
 // 未登录时先暂存在本地，登录那一刻合并进服务端。
 const GUEST_CART_KEY = "little-mall:guest:cart";
 let cartView = null; // 服务端返回：items + 试算金额 + 优惠说明
+let currentQuoteId = null; // 用户看到当前购物袋金额时，由服务端拍下的快照
 let guestCart = {};
 try {
   guestCart = JSON.parse(localStorage.getItem(GUEST_CART_KEY)) || {};
@@ -36,12 +37,33 @@ let products = [],
 function saveGuestCart() {
   localStorage.setItem(GUEST_CART_KEY, JSON.stringify(guestCart));
 }
+async function captureCurrentQuote() {
+  currentQuoteId = null;
+  if (!user || !cartView?.items?.length) return;
+  try {
+    const items = cartView.items.map(({ productId, quantity }) => ({
+      productId,
+      quantity,
+    }));
+    const quote = await api("/api/quotes", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    });
+    currentQuoteId = quote.id;
+  } catch {
+    // 快照是用户保护而非下单权限边界；网络抖动时保留购物袋并按无快照兼容。
+    currentQuoteId = null;
+  }
+}
 async function loadCart() {
   if (!user) return;
   try {
     cartView = await api("/api/cart");
+    // 金额展示给用户的这一刻拍快照，而不是点击提交后才拍。
+    await captureCurrentQuote();
   } catch {
     cartView = null;
+    currentQuoteId = null;
   }
 }
 // 登录后把游客暂存合并进服务端购物袋；失败不影响正常浏览，暂存会留到下次。
@@ -191,6 +213,7 @@ async function addToCart(id) {
       method: "POST",
       body: JSON.stringify({ productId: Number(id), quantity: 1 }),
     });
+    await captureCurrentQuote();
     renderCart();
     toast(`已加入购物袋：${p.name}`);
   } catch (error) {
@@ -213,6 +236,7 @@ async function setQuantity(id, quantity) {
             method: "PUT",
             body: JSON.stringify({ productId: id, quantity }),
           });
+    await captureCurrentQuote();
     renderCart();
   } catch (error) {
     // 服务端拒绝（库存不足等）时以服务端为准重拉一次，避免前端显示与真实状态不一致。
@@ -232,7 +256,10 @@ async function checkout() {
     items: entries
       .map((row) => ({ productId: Number(row.productId), quantity: row.quantity }))
       .sort((a, b) => a.productId - b.productId),
+    quoteId: currentQuoteId,
   };
+  // 这里是浏览器层把快照串到下单请求的关键点；MockMvc 只能覆盖服务端链路，
+  // 未引入 JavaScript 测试框架前，本段仍需由真机反向冒烟守护。
   let request = read("pendingRequest", null);
   if (!request || JSON.stringify(request.body) !== JSON.stringify(body))
     request = { key: crypto.randomUUID(), body };

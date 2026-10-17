@@ -6,6 +6,7 @@ import dev.learning.mall.messaging.api.DomainEventPublisher;
 import dev.learning.mall.order.api.*;
 import dev.learning.mall.payment.api.*;
 import dev.learning.mall.pricing.api.Pricer;
+import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -42,17 +43,22 @@ public class OrderTransactions implements OrderCancellation {
 
     @Transactional
     @Observed("create-order-transaction")
-    public OrderView create(String user, String key, String hash, List<CreateOrderRequest.Line> lines) {
+    public OrderView create(String user, String key, String hash,
+                            List<CreateOrderRequest.Line> lines, BigDecimal expectedPayable) {
+        // 金额快照与落单共用 OrderPricing：两条路径都从商品表取实时价格，
+        // 再交给唯一的 Pricer，不允许在订单里另写一套求和规则。
+        Pricer.Quote quote = OrderPricing.quoteOf(catalog, pricer, lines);
+        // 比价必须发生在任何写调用之前。若先 insert 再抛异常，事务回滚虽然能清库，
+        // 但已经越过了“价格变化时零写入”的控制流边界。
+        if (expectedPayable != null && quote.payable().compareTo(expectedPayable) != 0) {
+            throw BusinessException.conflict("PRICE_CHANGED",
+                    "商品价格已变动：发起时 ¥" + expectedPayable + "，当前应付 ¥"
+                            + quote.payable() + "，请确认后重新提交");
+        }
         List<OrderView.Item> items = lines.stream().map(line -> {
             var product = catalog.get(line.productId());
             return new OrderView.Item(product.id(), product.name(), product.price(), line.quantity());
         }).toList();
-        // 金额一律问唯一的定价器：满减与运费在这一步就被算进去，
-        // 于是订单上的数字和用户刚才在购物袋里、在对话中看到的完全一致。
-        // 这里曾经是裸求和，把满减与运费全丢了——同一个用户 3 秒内看到两个金额。
-        // 详见 docs/对标淘宝差距分析.md 的 G1 与 docs/优化计划.md。
-        Pricer.Quote quote = pricer.quote(items.stream()
-                .map(i -> new Pricer.Line(i.productId(), i.unitPrice(), i.quantity())).toList());
         String id = UUID.randomUUID().toString();
         // 截止时间在下单这一刻算好并落库：之后即使运营改了支付时限，这笔订单承诺给用户的
         // 那个时刻也不会跳变（用户看到的倒计时必须和下单时说的一致）。

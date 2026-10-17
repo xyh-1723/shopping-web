@@ -329,8 +329,7 @@ class AgentOrderCheckoutTest {
         // 「下单成功」的消息，会话不存在时写不进去，而那正是用户看到的确认回执。
         var conv = service.create(username, null);
         try (TurnScope.Scope ignored = TurnScope.begin(conv.id(), username)) {
-            return pendingActions.requestOrderCreate(username, cart.orderLines(username),
-                    cart.view(username).total());
+            return pendingActions.requestOrderCreate(username, cart.orderLines(username));
         }
     }
 

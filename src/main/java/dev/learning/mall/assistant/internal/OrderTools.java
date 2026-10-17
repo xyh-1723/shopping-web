@@ -46,11 +46,11 @@ public class OrderTools {
             + "因此返回后你必须告诉用户「已经帮你发起下单确认，请点击卡片上的确认下单」，"
             + "绝不能说「已下单」「订单已生成」。若购物袋为空则会失败，此时应提示用户先挑选商品。返回 JSON。")
     public String createOrder(@ToolMemoryId String username) {
-        // 行与金额都取自购物袋的当前快照：价格按现在的商品表算，
-        // 助手报出的数字与用户即将确认的数字因此是同一个。
+        // 商品行取自购物袋；应付金额由 PendingActionService 拍摄的服务端快照产出，
+        // 模型与调用方都没有传价入口。
         var view = cart.view(username);
         try {
-            var pending = pendingActions.requestOrderCreate(username, cart.orderLines(username), view.total());
+            var pending = pendingActions.requestOrderCreate(username, cart.orderLines(username));
             ObjectNode node = json.createObjectNode();
             node.put("status", "PENDING_CONFIRMATION");
             node.put("actionId", pending.id());
