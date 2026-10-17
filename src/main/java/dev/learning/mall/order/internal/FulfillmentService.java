@@ -7,8 +7,11 @@ import dev.learning.mall.order.api.OrderView;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Locale;
+import java.util.function.IntSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
@@ -50,6 +53,15 @@ import org.springframework.transaction.support.TransactionTemplate;
  * <p><b>转换权 = 责任</b>：所有前置条件都写在 UPDATE 的 WHERE 里，「这次状态转换是我完成的」
  * 由影响行数证明。因此这里刻意<b>不在 Java 里先判状态再更新</b>——那样做等于把唯一的判定
  * 挪出 SQL，谁绕过这个 Service 直接改库，规则就消失了。
+ *
+ * <h3>约束异常不许冒泡成 500</h3>
+ *
+ * <p>判定权在数据库，但「数据库判完之后」的异常如果原样冒泡到 HTTP，用户拿到的是 500，
+ * 调用方会把它归类成「服务端抖动、可重试」，而「订单没付钱不能发货」其实是一个
+ * <b>说得清</b>的业务结果。所以五处写调用都包在 {@code guarded} 里：
+ * 命中本项目自己起的履约约束名 → 409 业务码；命中不了 → 原样抛出（继续是 500），
+ * 免得把真正的数据层 bug 也藏进「业务冲突」。
+ * 由 {@code FulfillmentHttpGuardTest} 守着。
  */
 @Service
 public class FulfillmentService {
@@ -58,6 +70,85 @@ public class FulfillmentService {
 
     /** 单笔订单自动推进的事务超时（秒）：本地库毫秒级完成，给个上限避免极端情况长期持锁。 */
     private static final int TX_TIMEOUT_SECONDS = 10;
+
+    /**
+     * 履约约束 → 对外的业务结果。
+     *
+     * <p><b>这里只做翻译，不做预判</b>：判定权仍然完全在数据库（谁改了 UPDATE 的 WHERE、
+     * 或漏写了某个时刻，约束照样把他打回）。这里做的是「异常已经逃逸出来之后，别让 HTTP 层
+     * 把它当 Internal Server Error 吐出去」——订单没付钱不能发货是一个<b>说得清</b>的业务
+     * 结果，不该伪装成服务器故障，也不该在调用方日志里被归成「可忽略异常」而彻底静默。
+     */
+    private enum FulfillmentConstraint {
+        NEEDS_PAID("ck_order_fulfillment_needs_paid", "FULFILLMENT_NEEDS_PAID",
+                "订单未支付，不能进入履约流程"),
+        FIELDS("ck_order_fulfillment_fields", "FULFILLMENT_MOMENT_MISSING",
+                "履约状态与对应时刻不一致，本次推进已被拒绝"),
+        STATUS("ck_order_fulfillment_status", "FULFILLMENT_STATUS_INVALID",
+                "履约状态取值非法，本次推进已被拒绝");
+
+        private final String constraintName;
+        private final String code;
+        private final String message;
+
+        FulfillmentConstraint(String constraintName, String code, String message) {
+            this.constraintName = constraintName;
+            this.code = code;
+            this.message = message;
+        }
+    }
+
+    /**
+     * 把履约路径上逃逸的约束异常翻译成业务冲突（409）。
+     *
+     * <p><b>刻意只认本项目自己起的约束名</b>：其它 {@code DataIntegrityViolationException}
+     * （唯一键、非空、别的表的 CHECK）一律原样抛出，让它们继续是 500——把未知的数据层错误
+     * 也一并翻译成「业务冲突」，等于把真正的 bug 藏起来。
+     *
+     * @return 命中已知履约约束时的业务异常；否则返回 {@code null}，由调用方原样抛出。
+     */
+    private static BusinessException translate(DataIntegrityViolationException e) {
+        String text = constraintText(e);
+        for (FulfillmentConstraint known : FulfillmentConstraint.values()) {
+            // 按「名字 + 冒号」匹配，而不是裸子串：H2 的报错形如
+            //   Check constraint violation: "CK_ORDER_FULFILLMENT_NEEDS_PAID: (...)"
+            // 裸子串匹配会让 CK_ORDER_FULFILLMENT_STATUS 命中 NEEDS_PAID 这一条
+            // （前者是后者的前缀），于是返回的业务码指错约束——比不翻译更难排查。
+            // 两边都取大写后再比：迁移脚本里写的是小写，H2 报出来的是大写。
+            String marker = known.constraintName.toUpperCase(Locale.ROOT) + ":";
+            if (text.contains(marker)) {
+                return BusinessException.conflict(known.code, known.message + "（" + known.constraintName + "）");
+            }
+        }
+        return null;
+    }
+
+    /** 把整条异常链上的消息拼成一段文本：H2 的约束名只出现在最内层的那条消息里。 */
+    private static String constraintText(Throwable e) {
+        StringBuilder text = new StringBuilder();
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            String message = t.getMessage();
+            if (message != null) text.append(message);
+            if (text.length() > 2000) break;
+        }
+        return text.toString().toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * 一次履约写调用的边界：命中已知约束 → 409，否则原样抛。
+     *
+     * @param write 真正执行 UPDATE 的那一步。
+     * @return UPDATE 的影响行数。
+     */
+    private static int guarded(IntSupplier write) {
+        try {
+            return write.getAsInt();
+        } catch (DataIntegrityViolationException e) {
+            BusinessException business = translate(e);
+            if (business != null) throw business;
+            throw e;
+        }
+    }
 
     private final OrderRepository orders;
     private final DomainEventPublisher events;
@@ -98,7 +189,7 @@ public class FulfillmentService {
         // 自动收货时刻在发货这一刻算好并落库：之后运营把 10 天改成 7 天，
         // 不该让已经在这批路上的订单的对账一起跳变（V15 里 auto_receive_at 那句注释）。
         LocalDateTime autoReceiveAt = now.plusDays(properties.getAutoReceiveDays());
-        if (orders.markShipped(id, staff, shippingNo, now, autoReceiveAt) != 1)
+        if (guarded(() -> orders.markShipped(id, staff, shippingNo, now, autoReceiveAt)) != 1)
             throw BusinessException.conflict("INVALID_STATE", "订单不在可发货状态：须为已支付且尚未发货");
         events.publish(id, row.username(), "ORDER_SHIPPED", "订单已发货，运单号 " + shippingNo
                 + "，" + properties.getAutoReceiveDays() + " 天后自动确认收货。");
@@ -118,7 +209,7 @@ public class FulfillmentService {
     @Observed("receive-order")
     public OrderView receive(String id, String user) {
         LocalDateTime now = LocalDateTime.now(clock);
-        if (orders.markReceived(id, user, now) != 1) throw notAdvanceable(id, user, "待收货");
+        if (guarded(() -> orders.markReceived(id, user, now)) != 1) throw notAdvanceable(id, user, "待收货");
         events.publish(id, user, "ORDER_RECEIVED", "已确认收货，订单 " + id.substring(0, 8) + " 待完成。");
         return orders.view(orders.lock(id).orElseThrow(() -> BusinessException.notFound("订单不存在")));
     }
@@ -133,7 +224,7 @@ public class FulfillmentService {
     @Observed("complete-order")
     public OrderView complete(String id, String user) {
         LocalDateTime now = LocalDateTime.now(clock);
-        if (orders.markCompleted(id, user, now) != 1) throw notAdvanceable(id, user, "待完成");
+        if (guarded(() -> orders.markCompleted(id, user, now)) != 1) throw notAdvanceable(id, user, "待完成");
         events.publish(id, user, "ORDER_COMPLETED", "交易已完成，感谢购买。");
         return orders.view(orders.lock(id).orElseThrow(() -> BusinessException.notFound("订单不存在")));
     }
@@ -181,12 +272,12 @@ public class FulfillmentService {
             OrderRow row = orders.lock(id).orElse(null);
             if (row == null) return new AutoAdvance(0, 0);
             // 第一步：SHIPPED → RECEIVED。只有它真的把状态推走，才发 ORDER_RECEIVED。
-            int received = orders.markAutoReceived(id, now, now);
+            int received = guarded(() -> orders.markAutoReceived(id, now, now));
             if (received == 1)
                 events.publish(id, row.username(), "ORDER_RECEIVED", "已自动确认收货。");
             // 第二步：RECEIVED → COMPLETED。条件同样是到期，但是<b>另一条</b> UPDATE：
             // 合成一条会让 received_at 留空，被 ck_order_fulfillment_fields 打回。
-            int completed = orders.markAutoCompleted(id, now, now);
+            int completed = guarded(() -> orders.markAutoCompleted(id, now, now));
             if (completed == 1)
                 events.publish(id, row.username(), "ORDER_COMPLETED", "交易已完成（自动确认收货）。");
             return new AutoAdvance(received, completed);
