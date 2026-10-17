@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # 第一道：离线可跑的全部验证（单元/集成测试 + JS 组件测试）。
+  # 安全守卫、工具权限、HITL 支付确认、RAG 三道防线都在 mvn verify 里有 Mock 模型版的覆盖。
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: mvn verify（含安全守卫 / 权限 / HITL / RAG 测试）
+        run: mvn -B verify
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: 语音组件单元测试
+        run: |
+          npm ci
+          npm run test:voice
+
+  # 第二道：真实模型端到端评测 + 自动化红队。
+  # 需要仓库配置 DEEPSEEK_API_KEY secret；未配置时整组步骤跳过（verify 仍然是硬门槛）。
+  security-eval:
+    needs: verify
+    runs-on: ubuntu-latest
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: 构建与安装浏览器
+        if: env.DEEPSEEK_API_KEY != ''
+        run: |
+          mvn -B package -DskipTests
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: 启动商城（放开限流便于批量评测）
+        if: env.DEEPSEEK_API_KEY != ''
+        run: |
+          DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY" java -jar target/learning-mall-1.0.0.jar \
+            --server.port=8092 \
+            --mall.assistant.enabled=true \
+            --mall.assistant.provider=deepseek \
+            --mall.assistant.security.rate-limit-per-minute=300 &
+          for i in $(seq 1 60); do
+            curl -sf http://127.0.0.1:8092/api/products > /dev/null && exit 0
+            sleep 2
+          done
+          echo "应用启动超时" && exit 1
+      - name: 端到端安全评测（真实 DeepSeek）
+        if: env.DEEPSEEK_API_KEY != ''
+        run: MALL_URL=http://127.0.0.1:8092 node tests/security-eval.cjs
+      - name: 自动化红队（变异攻击，绕过率卡线 15%）
+        if: env.DEEPSEEK_API_KEY != ''
+        run: MALL_URL=http://127.0.0.1:8092 MALL_REDTEAM_MAX_BYPASS_RATE=0.15 node tests/redteam-mutate.cjs
+      - name: 上传评测与红队报告
+        if: env.DEEPSEEK_API_KEY != '' && always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: artifacts/

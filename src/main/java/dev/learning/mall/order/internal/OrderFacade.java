@@ -1,0 +1,53 @@
+package dev.learning.mall.order.internal;
+
+import dev.learning.mall.common.BusinessException;
+import dev.learning.mall.order.api.*;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Comparator;
+import java.util.HexFormat;
+import java.util.List;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+
+@Service
+public class OrderFacade implements OrderCheckout {
+    private final OrderRepository orders;
+    private final OrderTransactions transactions;
+    public OrderFacade(OrderRepository orders, OrderTransactions transactions) {
+        this.orders = orders; this.transactions = transactions;
+    }
+    // 特意不加 @Transactional：唯一键异常必须先从另一个 Bean 的事务中退出并回滚，再查询旧订单。
+    @Override
+    public OrderView create(String user, String key, CreateOrderRequest request) {
+        if (key == null || !key.matches("[A-Za-z0-9_-]{8,80}"))
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_KEY", "请求编号须为 8 至 80 位字母、数字、下划线或横线");
+        if (request == null || request.items() == null || request.items().isEmpty() || request.items().size() > 20
+                || request.items().stream().anyMatch(line -> line == null || line.productId() <= 0 || line.quantity() < 1 || line.quantity() > 99))
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_ITEMS", "请检查商品和数量");
+        List<CreateOrderRequest.Line> lines = request.items().stream().sorted(Comparator.comparingLong(CreateOrderRequest.Line::productId)).toList();
+        if (lines.stream().map(CreateOrderRequest.Line::productId).distinct().count() != lines.size())
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "DUPLICATE_PRODUCT", "同一种商品请合并数量后提交");
+        String canonical = lines.stream().map(line -> line.productId() + ":" + line.quantity()).reduce("", (a, b) -> a + b + ";");
+        String hash = hash(canonical);
+        var existing = orders.byKey(user, key);
+        if (existing.isPresent()) return replay(existing.get(), hash);
+        try {
+            return transactions.create(user, key, hash, lines);
+        } catch (DuplicateKeyException conflict) {
+            OrderRow row = orders.byKey(user, key).orElseThrow(() -> conflict);
+            return replay(row, hash);
+        }
+    }
+    private OrderView replay(OrderRow row, String hash) {
+        if (!row.requestHash().equals(hash)) throw BusinessException.conflict("IDEMPOTENCY_CONFLICT", "同一请求编号不能用于不同的购物车内容");
+        return orders.view(row);
+    }
+    private static String hash(String text) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(text.getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
+    }
+}

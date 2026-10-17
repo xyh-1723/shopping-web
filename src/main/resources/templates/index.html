@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="_csrf" th:content="${_csrf.token}" />
+    <meta name="_csrf_header" th:content="${_csrf.headerName}" />
+    <title>小小商城 · 把日常装进购物车</title>
+    <link rel="icon" type="image/svg+xml" href="/art/bag.svg" />
+    <link rel="stylesheet" href="/css/style.css" />
+    <script src="/js/app.js" defer></script>
+  </head>
+  <body th:attr="data-user=${username}">
+    <header class="site-header">
+      <a class="brand" href="/"
+        ><span class="brand-mark">小</span>小小商城<span class="brand-en"
+          >EVERYDAY GOODS</span
+        ></a
+      >
+      <nav aria-label="主导航">
+        <button class="nav-link active" data-view="shop">逛逛商品</button
+        ><button class="nav-link" data-view="orders">我的订单</button
+        ><button class="nav-link" data-view="messages">
+          消息中心<span class="nav-dot"></span></button
+        ><a class="nav-link" href="/assistant">购物助手 ✦</a
+        ><a class="nav-link" href="/learn">学习地图 ↗</a>
+      </nav>
+      <div class="account">
+        <a class="button dark small" th:if="${username == ''}" href="/login"
+          >登录体验 ↗</a
+        ><th:block th:if="${username != ''}"
+          ><span class="avatar" aria-hidden="true">S</span
+          ><span th:text="${username}"></span>
+          <form th:action="@{/logout}" method="post">
+            <button class="text-button" type="submit">退出</button>
+          </form></th:block
+        >
+      </div>
+    </header>
+    <main>
+      <section id="shop-view" class="view">
+        <div class="hero">
+          <div class="hero-copy">
+            <span class="eyebrow"><i></i> SMALL THINGS, BETTER DAYS</span>
+            <h1>把日常，<br />装进<span>购物车。</span></h1>
+            <p>
+              一些实用的小物，一点生活的灵感。<br />从喜欢的一件开始，让平凡的每一天更可爱。
+            </p>
+            <a href="#catalog" class="button dark">发现好物 <span>↗</span></a>
+            <div class="hero-foot">
+              <span>精选 6 件好物</span><span>简简单单，刚刚好</span>
+            </div>
+          </div>
+          <div class="hero-art">
+            <span class="art-label">THE EVERYDAY<br />COLLECTION / 01</span
+            ><img
+              src="/art/hero.svg"
+              alt="马克杯、笔记本与绿植组成的日常小物插画"
+            /><span class="art-sticker">小物件<br />大欢喜 ✦</span>
+          </div>
+        </div>
+        <div class="benefit-bar">
+          <span>✦ 用心挑选的日常好物</span><span>⌁ 轻松下单，慢慢发现</span
+          ><span>◎ 学习演示 · 不产生真实交易</span>
+        </div>
+        <div class="store-layout" id="catalog">
+          <section class="catalog">
+            <div class="section-heading">
+              <div>
+                <span class="eyebrow muted">CURATED FOR YOU</span>
+                <h2>今日好物 <span id="product-count">6</span></h2>
+              </div>
+              <label class="search"
+                ><span aria-hidden="true">⌕</span
+                ><input
+                  id="search"
+                  type="search"
+                  placeholder="寻找一件小物…"
+                  aria-label="搜索商品"
+              /></label>
+            </div>
+            <div class="filters" aria-label="商品分类">
+              <button class="chip active" data-category="全部">全部好物</button
+              ><button class="chip" data-category="生活">日常生活</button
+              ><button class="chip" data-category="文具">灵感文具</button
+              ><button class="chip" data-category="数码">桌面数码</button>
+            </div>
+            <div class="product-grid" id="products" aria-live="polite">
+              <p class="empty">正在整理货架…</p>
+            </div>
+          </section>
+          <aside class="cart-panel" aria-label="购物车">
+            <div class="cart-heading">
+              <h2>我的购物袋</h2>
+              <span id="cart-count" class="count-bubble">0</span>
+            </div>
+            <p class="subtle">给日常添一点新鲜感</p>
+            <div id="cart-items"></div>
+            <div class="cart-summary">
+              <div>
+                <span>商品合计</span><strong id="cart-total">¥0.00</strong>
+              </div>
+              <div class="subtle">
+                <span>配送费用</span><span>学习演示 · 免运费</span>
+              </div>
+            </div>
+            <button id="checkout" class="button green wide" disabled>
+              提交订单 <span>→</span>
+            </button>
+            <p class="cart-note">
+              下单后可在「我的订单」中模拟支付。<br />支持取消订单，库存会自动归还。
+            </p>
+            <div class="learning-tip">
+              <span>✧ 边逛边学</span>
+              <p>
+                每一次点击背后，都是一个<br />可以读懂的 Spring Boot 知识点。
+              </p>
+              <a href="/learn">打开学习地图 ↗</a>
+            </div>
+          </aside>
+        </div>
+      </section>
+      <section id="orders-view" class="view hidden">
+        <div class="page-heading">
+          <div>
+            <span class="eyebrow muted">YOUR ORDERS</span>
+            <h1>我的订单</h1>
+            <p>查看最近 50 笔订单，体验模拟支付与取消。</p>
+          </div>
+          <button id="replay" class="button outline">重发上次下单请求</button>
+        </div>
+        <div class="info-strip">
+          下单预占库存；取消归还库存。重复提交同一请求编号，会返回已有订单。
+        </div>
+        <div id="orders" class="order-list"></div>
+      </section>
+      <section id="messages-view" class="view hidden">
+        <div class="page-heading">
+          <div>
+            <span class="eyebrow muted">BEHIND THE SCENES</span>
+            <h1>消息中心</h1>
+            <p>订单通知由后台异步送达，此页面每 3 秒刷新。</p>
+          </div>
+          <span class="live-tag"><i></i> 自动刷新</span>
+        </div>
+        <div id="pool-stats" class="stats-grid"></div>
+        <div class="message-layout">
+          <section>
+            <h2>我的通知</h2>
+            <div id="notifications"></div>
+          </section>
+          <section>
+            <h2>消息投递记录 <span class="subtle">最近 50 条</span></h2>
+            <div id="events"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <footer>
+      <a class="brand" href="/"><span class="brand-mark">小</span>小小商城</a
+      ><span>认真生活，也认真学习。</span
+      ><span>Spring Boot 学习项目 / 2026</span>
+    </footer>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  </body>
+</html>

@@ -1,0 +1,24 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:malltest;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+mall:
+  messaging:
+    enabled: false
+  # 主动服务在测试里默认关闭：否则定时扫描与商品变更事件会在后台写提醒，
+  # 让「我现在有几条提醒」这类断言随执行时序飘。需要时由 ProactiveServiceTest 显式打开。
+  proactive:
+    enabled: false
+  # 超时关单在测试里默认关闭：否则后台定时扫描会关掉正在被断言的订单，
+  # 让「库存有没有归还」这类断言随执行时序飘。需要时由 OrderExpiryTest 显式打开。
+  order:
+    auto-close-enabled: false
+  assistant:
+    memory:
+      # 测试里默认关掉「轮后自动抽取偏好」：它会在线程池上异步再跑一次模型/写库，
+      # 于是「模型被调了几次」「我的偏好是空的」这类断言会随执行时序飘。
+      # 该功能由 PreferenceAutoExtractTest 显式打开后单独验证。
+      auto-extract: false
+      auto-extract-model: false
+logging:
+  level:
+    dev.learning.mall: WARN

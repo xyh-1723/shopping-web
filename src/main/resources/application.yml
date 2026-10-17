@@ -1,0 +1,130 @@
+server:
+  address: 127.0.0.1
+  port: ${PORT:8080}
+  servlet:
+    session:
+      timeout: 30m
+      cookie:
+        http-only: true
+        same-site: lax
+spring:
+  application:
+    name: learning-mall
+  # 密钥不进版本库：本地把 mall.assistant.deepseek.api-key 写进 .deepseek.key（已在 .gitignore 中），
+  # 或者直接用环境变量 DEEPSEEK_API_KEY 覆盖。这也顺带演示了「凭据不落代码」这条基本要求。
+  config:
+    import: optional:file:.deepseek.key[.properties]
+  datasource:
+    url: jdbc:h2:file:./data/mall;DB_CLOSE_ON_EXIT=FALSE;LOCK_TIMEOUT=10000
+    username: sa
+    password: ${DB_PASSWORD:}
+    hikari:
+      maximum-pool-size: 12
+  thymeleaf:
+    cache: false
+  jackson:
+    time-zone: Asia/Shanghai
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+mall:
+  demo-password: ${MALL_DEMO_PASSWORD:learn12345}
+  # 促销与运费。这是全系统唯一的金额计算入口：购物袋页面、下单、助手对话三处共用，
+  # 因此「对话里说减 10，结算只减 5」这类事故在结构上不可能发生。
+  shopping:
+    free-shipping-threshold: 99    # 折后满此金额包邮
+    shipping-fee: 8                # 未达门槛的运费
+    promotions:                    # 只取满足条件的最高一档，不叠加
+      - threshold: 99
+        discount: 10
+      - threshold: 199
+        discount: 25
+  assistant:
+    enabled: true
+    # 模型提供商：zhipu（智谱 GLM）或 deepseek（DeepSeek，OpenAI 兼容）
+    provider: deepseek
+    zhipu:
+      api-key: ${ZHIPU_API_KEY:}
+      base-url: ${ZHIPU_BASE_URL:https://open.bigmodel.cn/api/paas/v4}
+    deepseek:
+      # 不在仓库里写密钥：优先读环境变量，其次读 .deepseek.key
+      api-key: ${DEEPSEEK_API_KEY:}
+      base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}
+    # deepseek 可用模型：deepseek-chat（对话，快且便宜）、deepseek-flash（带推理，会消耗推理 token）
+    # 助手场景用 deepseek-chat：响应快、输出稳定，不受推理 token 挤占回复长度的影响。
+    model: ${MALL_ASSISTANT_MODEL:deepseek-chat}
+    memory-window: 20
+    # RAG 知识库：进程内 BGE-small-zh 嵌入（离线），检索结果按角色隔离并过输入守卫
+    knowledge:
+      enabled: true
+      max-results: 3
+      # 相似度阈值按实测分布校准：相关 0.74-0.89 / 无关 0.65-0.69，取空档 0.71
+      min-score: 0.71
+    security:
+      max-input-length: 1000        # 单条输入字符上限，超过直接拦截（LLM10）
+      max-output-length: 2000       # 单条回复字符上限，超过截断（LLM05）
+      rate-limit-per-minute: 20     # 每用户每分钟请求上限（LLM10）
+      mask-pii: true                # 送模型前脱敏手机号/证件号/邮箱（LLM02）
+      audit-allowed: false          # 是否连正常放行也写审计（默认只记安全事件）
+    # Agent 执行循环（harness）的预算。这些是运营参数，换模型/换成本档位都要调，
+    # 所以不写死在代码里——写死的预算最后都会被改成「反正先设大一点」，等于没有预算。
+    harness:
+      max-steps: 6                  # 最多几轮「模型 → 工具」
+      timeout-ms: 30000             # 整轮墙钟上限，到点停止并给诚实兜底答复
+      max-tool-result-chars: 4000   # 单个工具结果进模型前裁剪（卡片数据仍用完整结果）
+      max-same-tool-repeat: 2       # 同一调用允许重复出现的次数，超过视为原地打转
+      max-parallel-tools: 4         # 全局并行工具预算：所有用户共享，抢不到就顺序执行（不排队等）
+      trace-enabled: true           # 是否把每次运行轨迹落库（停止原因/每步耗时）
+    # 多用户并发的隔离与异步。默认策略是「保护整体、牺牲个体」：
+    # 宁可让个别请求快速失败并给出可重试提示，也不让所有请求一起排队、一起超时。
+    concurrency:
+      core-pool-size: 4             # 助手专用线程池核心线程数（与 Tomcat 线程池物理隔离）
+      max-pool-size: 16             # 最大线程数，应与 max-in-flight-global 对齐：入池即占一个线程
+      queue-capacity: 64            # 队列容量（正常情况下用不到，在途上限先拦住，这是第二道保险丝）
+      max-in-flight-global: 16      # 全局同时在途上限，超过返回 503（系统已满，请稍后重试）
+      max-in-flight-per-user: 3     # 单用户同时在途上限，超过返回 429（防止一个人开多会话占满全局）
+      serialize-per-conversation: true  # 同一会话串行：并发发第二条返回 409，避免历史顺序错乱
+    # 以图搜款的「看图」一步。视觉模型独立配置，与对话模型解耦：
+    # 对话模型 deepseek-chat 不支持图像输入，而支持视觉的模型通常更贵、更慢，
+    # 两者分开才能做到「只有用户真的发了图，才付这一次视觉调用的钱」。
+    # 默认关闭：没配视觉模型时，收到图片会如实告知「我看不了图」，而不是让模型编一段描述。
+    vision:
+      enabled: false               # 开启前请先确认 provider 的密钥有效
+      provider: zhipu              # zhipu（GLM-4V）或 deepseek（OpenAI 兼容端点）
+      model: glm-4v-flash          # 智谱免费档视觉模型；密钥留空时复用上面 zhipu.api-key
+      api-key: ""                  # 留空则复用同 provider 的对话密钥
+      base-url: ""                 # 留空则用 provider 默认地址
+      max-images: 3                # 单条消息最多几张图
+      max-bytes-per-image: 4194304 # 单张上限 4MB（解码后的字节数，非 base64 长度）
+      timeout-ms: 30000            # 看图这一步单独的超时
+  messaging:
+    enabled: true
+    poll-delay-ms: 1000
+    core-pool-size: 2
+    max-pool-size: 4
+    queue-capacity: 32
+    max-attempts: 5
+    retry-delay-seconds: 2
+  # 订单：支付时限 + 超时自动关闭。
+  # 关闭动作与「用户主动取消」是同一份实现，只是关闭原因不同（USER / TIMEOUT）。
+  order:
+    payment-timeout-minutes: 15  # 下单时承诺的支付时限，落库为 expires_at，之后改配置不影响存量订单
+    auto-close-enabled: true     # 关掉它 = 回到「弃单把库存占死」的旧行为，仅用于排障
+    auto-close-scan-delay-ms: 60000
+    auto-close-initial-delay-ms: 20000
+    auto-close-max-per-scan: 200 # 单轮上限。到期订单被关掉后即离开结果集，不存在队尾饥饿
+  # 主动服务：关注（降价/补货提醒）+ 关联推荐。
+  # 提醒由两条路触发：商品变更事件（及时）+ 定时扫描（兜底，保证不漏）。
+  proactive:
+    enabled: true
+    scan-delay-ms: 300000        # 定时兜底扫描间隔（5 分钟）
+    initial-delay-ms: 30000      # 启动后首次扫描延迟，避开应用初始化
+    max-alerts-per-scan: 500     # 单轮处理条数上限。带游标轮转，排队的只是多等一轮，不会被跳过
+logging:
+  level:
+    dev.learning.mall: INFO

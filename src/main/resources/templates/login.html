@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>登录 · 小小商城</title>
+    <link rel="icon" type="image/svg+xml" href="/art/bag.svg" />
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body class="login-body">
+    <a class="brand login-brand" href="/"
+      ><span class="brand-mark">小</span>小小商城</a
+    >
+    <main class="login-card">
+      <div class="eyebrow muted">WELCOME TO YOUR LITTLE STORE</div>
+      <h1>从一件好物开始。</h1>
+      <p class="subtle">登录后体验下单、模拟支付和异步通知。</p>
+      <div class="login-hint">
+        演示账号：<strong>student</strong> 或 <strong>classmate</strong>（顾客）<br />
+        店员账号：<strong>admin</strong>（多 <code>STAFF</code> 角色，可查经营数据与安全审计）<br />
+        初始密码：<strong>learn12345</strong>（若已配置新密码，请使用新密码）
+      </div>
+      <p th:if="${param.error}" class="error-text" role="alert">
+        账号或密码不正确，请重试。
+      </p>
+      <form th:action="@{/login}" method="post" class="login-form">
+        <label
+          >账号<input
+            name="username"
+            autocomplete="username"
+            value="student"
+            required /></label
+        ><label
+          >密码<input
+            type="password"
+            name="password"
+            autocomplete="current-password"
+            placeholder="输入演示密码"
+            required /></label
+        ><button class="button green wide" type="submit">登录商城 →</button>
+      </form>
+      <a class="back-link" href="/">← 先随便逛逛</a>
+      <p class="cart-note">这是本地教学项目，所有支付均为模拟。</p>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+target/
+node_modules/
+data/
+artifacts/
+*.log
+*.mv.db
+*.trace.db
+.workbuddy/*
+!.workbuddy/memory/
+
+# 凭据文件：不得进版本库
+.deepseek.key
+*.key

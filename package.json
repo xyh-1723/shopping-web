@@ -1,0 +1,15 @@
+{
+  "name": "learning-mall-browser-check",
+  "private": true,
+  "scripts": {
+    "test:browser": "node tests/browser-smoke.cjs",
+    "test:voice": "node --test tests/voice-kit.test.cjs",
+    "test:voice:browser": "node tests/voice-smoke.cjs",
+    "test:security": "node tests/security-eval.cjs",
+    "test:redteam": "node tests/redteam-mutate.cjs",
+    "test:async": "node tests/async-smoke.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2"
+  }
+}

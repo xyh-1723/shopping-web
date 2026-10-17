@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>学习地图 · 小小商城</title>
+    <link rel="icon" type="image/svg+xml" href="/art/bag.svg" />
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="brand" href="/"><span class="brand-mark">小</span>小小商城</a
+      ><a class="button outline small" href="/">← 回到商城</a>
+    </header>
+    <main class="learn-page">
+      <span class="eyebrow muted">LEARN BY BUILDING</span>
+      <h1>一个小商城，<br />读懂 Spring Boot 的主线。</h1>
+      <p class="learn-intro">
+        先运行，再跟踪一次请求，最后验证并发和可靠性。完整逐章教程在项目的
+        <code>docs/从零学习SpringBoot.md</code>，以下是你的阅读地图。
+      </p>
+      <div class="learning-grid">
+        <article>
+          <span>01 / 起步</span>
+          <h2>让应用跑起来</h2>
+          <p>
+            理解 JDK、Maven、HTTP、Spring 和 Spring Boot
+            的分工，启动项目并完成第一次下单。
+          </p>
+          <code>MallApplication · application.yml · pom.xml</code>
+        </article>
+        <article>
+          <span>02 / IoC 与 DI</span>
+          <h2>对象是谁创建的？</h2>
+          <p>
+            从构造器注入找到 Bean，再观察 Spring
+            如何把两种模拟支付策略装配到路由器。
+          </p>
+          <code>ProductService · PaymentRouter · SecurityConfig</code>
+        </article>
+        <article>
+          <span>03 / MVC 与校验</span>
+          <h2>跟着一次请求走</h2>
+          <p>
+            浏览器、Controller、Service、Repository、数据库，再到 JSON
+            和页面。试试传入数量 0。
+          </p>
+          <code>ProductController · OrderController · ApiExceptionHandler</code>
+        </article>
+        <article>
+          <span>04 / AOP 与事务</span>
+          <h2>给业务加上统一能力</h2>
+          <p>
+            查看耗时日志，再制造一次库存不足，确认订单、库存和待投递消息一起回滚。
+          </p>
+          <code>TimingAspect · Observed · OrderTransactions</code>
+        </article>
+        <article>
+          <span>05 / 幂等与并发</span>
+          <h2>重复点击会发生什么？</h2>
+          <p>
+            重发上次下单请求，观察订单编号没有变化。再运行并发测试，验证库存不会变成负数。
+          </p>
+          <code>OrderFacade · ProductRepository · MallIntegrationTest</code>
+        </article>
+        <article>
+          <span>06 / 线程池与消息</span>
+          <h2>让通知慢一点到达也没关系</h2>
+          <p>
+            观察消息中心；开启模拟故障，等待重试、死信，再恢复服务并重新投递。
+          </p>
+          <code>OutboxDispatcher · MessageProcessor · ExecutorConfig</code>
+        </article>
+      </div>
+      <div class="info-strip">
+        建议顺序：先读主教程第 0–5 章，再读第 6–10 章，最后完成
+        docs/实验手册.md。每章都有源码入口和练习。
+      </div>
+      <h2>一笔订单背后的旅程</h2>
+      <div class="flow">
+        <span>浏览器</span><b>→</b><span>安全过滤器</span><b>→</b
+        ><span>MVC 接口</span><b>→</b><span>订单事务</span><b>→</b
+        ><span>库存 + Outbox</span><b>→</b><span>线程池</span><b>→</b
+        ><span>站内通知</span>
+      </div>
+      <p class="subtle">
+        本项目采用数据库持久化任务队列，不包含独立 RabbitMQ
+        服务。消息可能重复投递，由消费端幂等保证本地通知不会重复。真实支付、外部短信和多实例部署的差异见教程进阶章节。
+      </p>
+    </main>
+  </body>
+</html>

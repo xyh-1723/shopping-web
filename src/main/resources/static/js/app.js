@@ -1,0 +1,498 @@
+// 原生 JavaScript：无前端构建步骤，学习重心留在后端。
+const $ = (selector) => document.querySelector(selector);
+const user = document.body.dataset.user;
+const scope = `little-mall:${user || "guest"}:`;
+const money = (value) => `¥${Number(value).toFixed(2)}`;
+const esc = (value) =>
+  String(value ?? "").replace(
+    /[&<>"']/g,
+    (char) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+        char
+      ],
+  );
+function read(key, fallback) {
+  try {
+    return JSON.parse(localStorage.getItem(scope + key)) ?? fallback;
+  } catch {
+    return fallback;
+  }
+}
+// 购物袋存在服务端（登录用户）：同一账号跨标签页、跨设备一致，助手也能往里加东西——
+// 如果它只活在某个浏览器的 localStorage 里，助手加购完用户根本看不到。
+// 未登录时先暂存在本地，登录那一刻合并进服务端。
+const GUEST_CART_KEY = "little-mall:guest:cart";
+let cartView = null; // 服务端返回：items + 试算金额 + 优惠说明
+let guestCart = {};
+try {
+  guestCart = JSON.parse(localStorage.getItem(GUEST_CART_KEY)) || {};
+} catch {}
+
+let products = [],
+  category = "全部",
+  currentView = "shop",
+  busy = false,
+  toastTimer;
+function saveGuestCart() {
+  localStorage.setItem(GUEST_CART_KEY, JSON.stringify(guestCart));
+}
+async function loadCart() {
+  if (!user) return;
+  try {
+    cartView = await api("/api/cart");
+  } catch {
+    cartView = null;
+  }
+}
+// 登录后把游客暂存合并进服务端购物袋；失败不影响正常浏览，暂存会留到下次。
+async function mergeGuestCart() {
+  if (!user) return;
+  const ids = Object.keys(guestCart);
+  if (!ids.length) return;
+  try {
+    for (const id of ids)
+      await api("/api/cart/items", {
+        method: "POST",
+        body: JSON.stringify({ productId: Number(id), quantity: guestCart[id] }),
+      });
+    guestCart = {};
+    localStorage.removeItem(GUEST_CART_KEY);
+    await loadCart();
+  } catch {}
+}
+function toast(message, error = false) {
+  const box = $("#toast");
+  box.textContent = message;
+  box.className = `toast${error ? " error" : ""}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => box.classList.add("hidden"), 4500);
+}
+async function api(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    [document.querySelector('meta[name="_csrf_header"]').content]:
+      document.querySelector('meta[name="_csrf"]').content,
+    ...options.headers,
+  };
+  const response = await fetch(path, {
+    ...options,
+    headers,
+    signal: AbortSignal.timeout(20000),
+  });
+  if (response.status === 401) {
+    location.href = "/login";
+    throw new Error("请先登录");
+  }
+  const text = await response.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error("响应格式异常，请刷新页面后重试");
+  }
+  if (!response.ok) throw new Error(data?.message || "请求失败，请稍后重试");
+  return data;
+}
+async function loadProducts() {
+  products = await api("/api/products");
+  await loadCart();
+  renderProducts();
+  renderCart();
+}
+function renderProducts() {
+  const search = $("#search").value.trim().toLowerCase();
+  const visible = products.filter(
+    (p) =>
+      (category === "全部" || p.category === category) &&
+      `${p.name}${p.description}`.toLowerCase().includes(search),
+  );
+  $("#product-count").textContent = visible.length;
+  $("#products").innerHTML =
+    visible
+      .map(
+        (p) =>
+          `<article class="product-card"><a class="product-link" href="/product/${p.id}"><div class="product-image" data-category="${esc(p.category)}"><span class="product-tag">${esc(p.category)}</span><img src="/art/${esc(p.illustration)}.svg" alt="${esc(p.name)}" loading="lazy"></div></a><div class="product-info"><h3><a class="product-link" href="/product/${p.id}">${esc(p.name)}</a></h3><p>${esc(p.description)}</p><div class="product-bottom"><div><div class="price"><small>¥</small>${Number(p.price).toFixed(2)}</div><div class="stock">${p.stock > 0 ? `现货 ${p.stock} 件` : "暂时售罄"}</div></div><button class="add-button" data-add="${p.id}" aria-label="将${esc(p.name)}加入购物车" ${p.stock === 0 ? "disabled" : ""}>+</button></div></div></article>`,
+      )
+      .join("") || '<p class="empty">没有找到这件小物，换个关键词试试。</p>';
+}
+// 当前购物袋里的行：登录用户取服务端快照（含实时价与库存），游客取本地暂存。
+function cartEntries() {
+  const find = (id) => products.find((p) => p.id === Number(id));
+  if (user && cartView)
+    return cartView.items
+      .map((item) => ({ ...item, product: find(item.productId) }))
+      .filter((row) => row.product);
+  return Object.entries(guestCart)
+    .map(([id, quantity]) => {
+      const product = find(id);
+      if (!product) return null;
+      return {
+        productId: product.id,
+        quantity,
+        unitPrice: product.price,
+        subtotal: product.price * quantity,
+        stock: product.stock,
+        available: product.stock >= quantity,
+        product,
+      };
+    })
+    .filter(Boolean);
+}
+function renderCart() {
+  const entries = cartEntries();
+  const count = entries.reduce((n, row) => n + row.quantity, 0);
+  // 金额统一由服务端算（含满减与运费），前端只做展示——同一个数字只有一处算法。
+  const total =
+    user && cartView
+      ? Number(cartView.total)
+      : entries.reduce((n, row) => n + Number(row.unitPrice) * row.quantity, 0);
+  $("#cart-count").textContent = count;
+  $("#cart-total").textContent = money(total);
+  $("#checkout").disabled = count === 0 || busy;
+  const notes =
+    user && cartView && cartView.notes && cartView.notes.length
+      ? `<div class="cart-notes">${cartView.notes
+          .map((text) => `<span>${esc(text)}</span>`)
+          .join("")}</div>`
+      : "";
+  $("#cart-items").innerHTML = entries.length
+    ? notes +
+      entries
+        .map(
+          (row) =>
+            `<div class="cart-row"><img src="/art/${esc(row.product.illustration)}.svg" alt=""><div class="cart-row-main"><div class="cart-row-title"><span>${esc(row.product.name)}</span><button class="remove" data-remove="${row.productId}" aria-label="移除${esc(row.product.name)}">×</button></div><div class="cart-row-bottom"><strong>${money(row.unitPrice)}</strong><div class="quantity"><button data-adjust="${row.productId}" data-delta="-1" aria-label="减少${esc(row.product.name)}数量">−</button><span>${row.quantity}</span><button data-adjust="${row.productId}" data-delta="1" aria-label="增加${esc(row.product.name)}数量">+</button></div></div>${row.available ? "" : `<div class="cart-warn">库存只剩 ${row.stock} 件，请调整数量</div>`}</div></div>`,
+        )
+        .join("")
+    : '<div class="empty"><div class="empty-bag">♧</div>购物袋还是空的<br>选一件喜欢的小物吧</div>';
+}
+async function adjust(id, delta) {
+  if (busy) return;
+  const p = products.find((p) => p.id === Number(id));
+  if (!p) return;
+  const current = user && cartView
+    ? cartView.items.find((item) => item.productId === Number(id))?.quantity || 0
+    : guestCart[id] || 0;
+  const next = current + delta;
+  if (delta > 0 && next > Math.min(p.stock, 99))
+    return toast("已达到当前可购买数量", true);
+  await setQuantity(Number(id), next);
+}
+async function addToCart(id) {
+  const p = products.find((p) => p.id === Number(id));
+  if (!p || p.stock === 0) return;
+  if (!user) {
+    guestCart[id] = Math.min((guestCart[id] || 0) + 1, Math.min(p.stock, 99));
+    saveGuestCart();
+    renderCart();
+    return toast("已暂存，登录后会自动并入购物袋");
+  }
+  try {
+    cartView = await api("/api/cart/items", {
+      method: "POST",
+      body: JSON.stringify({ productId: Number(id), quantity: 1 }),
+    });
+    renderCart();
+    toast(`已加入购物袋：${p.name}`);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+async function setQuantity(id, quantity) {
+  if (!user) {
+    if (quantity <= 0) delete guestCart[id];
+    else guestCart[id] = quantity;
+    saveGuestCart();
+    renderCart();
+    return;
+  }
+  try {
+    cartView =
+      quantity <= 0
+        ? await api(`/api/cart/items/${id}`, { method: "DELETE" })
+        : await api(`/api/cart/items/${id}`, {
+            method: "PUT",
+            body: JSON.stringify({ productId: id, quantity }),
+          });
+    renderCart();
+  } catch (error) {
+    // 服务端拒绝（库存不足等）时以服务端为准重拉一次，避免前端显示与真实状态不一致。
+    toast(error.message, true);
+    await loadCart();
+    renderCart();
+  }
+}
+async function checkout() {
+  if (!user) {
+    location.href = "/login";
+    return;
+  }
+  const entries = cartEntries();
+  if (busy || !entries.length) return;
+  const body = {
+    items: entries
+      .map((row) => ({ productId: Number(row.productId), quantity: row.quantity }))
+      .sort((a, b) => a.productId - b.productId),
+  };
+  let request = read("pendingRequest", null);
+  if (!request || JSON.stringify(request.body) !== JSON.stringify(body))
+    request = { key: crypto.randomUUID(), body };
+  // 发送之前保存 key 和正文：网络超时后重试仍使用同一编号。
+  localStorage.setItem(scope + "pendingRequest", JSON.stringify(request));
+  busy = true;
+  renderCart();
+  $("#checkout").textContent = "正在提交…";
+  try {
+    const order = await api("/api/orders", {
+      method: "POST",
+      headers: { "Idempotency-Key": request.key },
+      body: JSON.stringify(request.body),
+    });
+    localStorage.setItem(scope + "lastRequest", JSON.stringify(request));
+    localStorage.removeItem(scope + "pendingRequest");
+    // 不再在这里清袋：服务端下单成功后会同步清空（订单落库事件），页面与助手两条路径一致。
+    // 原来的写法是 await api("/api/cart", { method: "DELETE" }).catch(() => {})，
+    // 失败被静默吞掉——袋子留着、用户毫不知情，下次可能重复下单。清袋不该由前端负责。
+    await loadCart();
+    await loadProducts();
+    await showView("orders");
+    toast(`订单 ${order.id.slice(0, 8)} 已创建`);
+  } catch (error) {
+    toast(error.message + "；可再次提交重试", true);
+  } finally {
+    busy = false;
+    $("#checkout").innerHTML = "提交订单 <span>→</span>";
+    renderCart();
+  }
+}
+async function replay() {
+  const request = read("lastRequest", null);
+  if (!request) return toast("请先完成一次下单");
+  $("#replay").disabled = true;
+  try {
+    const order = await api("/api/orders", {
+      method: "POST",
+      headers: { "Idempotency-Key": request.key },
+      body: JSON.stringify(request.body),
+    });
+    toast(`幂等生效：仍是订单 ${order.id.slice(0, 8)}，没有重复扣库存`);
+    await loadOrders();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    $("#replay").disabled = false;
+  }
+}
+const statusText = {
+  PENDING: "待处理",
+  PAID: "已支付",
+  CANCELLED: "已取消",
+  DELIVERED: "已送达",
+  DEAD: "死信",
+};
+const time = (value) =>
+  String(value || "")
+    .replace("T", " ")
+    .slice(0, 19);
+// 关闭原因决定用户看到什么：主动取消与超时关闭在数据上是同一个状态，
+// 但对用户是两件事——后者要告诉他「东西还在，可以重新下单」。
+const closeReasonText = { USER: "已取消", TIMEOUT: "已超时关闭" };
+const deadlineOf = (value) => new Date(String(value || "").slice(0, 19)).getTime();
+const leftMs = (order) =>
+  order.expiresAt ? deadlineOf(order.expiresAt) - Date.now() : Infinity;
+const clockText = (ms) => {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  return `${String(Math.floor(total / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+};
+const orderBadge = (order) => {
+  if (order.status === "PENDING") return leftMs(order) > 0 ? "待支付" : "支付超时";
+  if (order.status === "CANCELLED")
+    return closeReasonText[order.closeReason] || "已取消";
+  return statusText[order.status] || order.status;
+};
+let orderTicker = null;
+let orderRefreshPending = false;
+// 倒计时只是体验，服务端才是唯一权威（客户端时钟可以随手改）。
+// 所以归零后不是自己把订单标成「已关闭」，而是回去问一次服务端。
+function tickCountdowns() {
+  let expired = false;
+  document.querySelectorAll("[data-deadline]").forEach((node) => {
+    const left = deadlineOf(node.dataset.deadline) - Date.now();
+    node.textContent = clockText(left);
+    if (left <= 0) expired = true;
+  });
+  if (expired && !orderRefreshPending) {
+    orderRefreshPending = true;
+    loadOrders()
+      .then(loadProducts)
+      .catch(() => {})
+      .finally(() => {
+        orderRefreshPending = false;
+      });
+  }
+}
+async function loadOrders() {
+  const orders = await api("/api/orders");
+  $("#orders").innerHTML =
+    orders
+      .map((order) => {
+        const pending = order.status === "PENDING";
+        const expired = pending && leftMs(order) <= 0;
+        const actions = pending
+          ? expired
+            ? '<span class="subtle">支付已超时，系统正在关闭订单并归还库存</span>'
+            : `<select aria-label="模拟支付方式" id="method-${order.id}"><option value="DEMO_CARD">模拟银行卡</option><option value="DEMO_WALLET">模拟钱包</option></select><button class="button outline small" data-order-action="cancel" data-id="${order.id}">取消订单</button><button class="button green small" data-order-action="pay" data-id="${order.id}">模拟支付</button>`
+          : order.status === "PAID"
+            ? '<span class="subtle">模拟交易 · 无实际扣款</span>'
+            : `<span class="subtle">${order.closeReason === "TIMEOUT" ? "超时未支付 · 库存已归还，可以重新下单" : "库存已归还"}</span>`;
+        const countdown = pending
+          ? `<div class="order-meta">剩余支付时间 <strong data-deadline="${esc(String(order.expiresAt).slice(0, 19))}">${clockText(leftMs(order))}</strong></div>`
+          : "";
+        // 金额拆成四行展示：只有一个「合计」数字时，用户无法判断优惠到底算没算进去。
+        // 应付一律取服务端算好的 payAmount，前端不做任何加减。
+        const num = (v) => (v === undefined || v === null ? 0 : Number(v));
+        const breakdown = `<div class="order-amounts">
+            <div><span class="subtle">商品小计</span><span>${money(num(order.subtotal))}</span></div>
+            ${num(order.discount) > 0 ? `<div><span class="subtle">满减优惠</span><span class="discount">−${money(num(order.discount))}</span></div>` : ""}
+            <div><span class="subtle">运费</span><span>${money(num(order.shippingFee))}</span></div>
+            <div class="order-payable"><span>应付</span><span>${money(num(order.payAmount))}</span></div>
+          </div>`;
+        return `<article class="order-card"><div class="order-top"><div><h3>订单 ${esc(order.id.slice(0, 8))}</h3><div class="order-meta">${esc(time(order.createdAt))} · ${esc(order.id)}</div>${countdown}</div><span class="badge ${esc(order.status)}">${orderBadge(order)}</span></div>${order.items.map((item) => `<div class="order-item"><span>${esc(item.productName)} <span class="subtle">× ${item.quantity}</span></span><span>${money(item.unitPrice * item.quantity)}</span></div>`).join("")}${breakdown}<div class="order-actions"><strong>${money(num(order.payAmount))}</strong>${actions}</div></article>`;
+      })
+      .join("") ||
+    '<div class="empty">还没有订单，先去挑选一件喜欢的小物吧。</div>';
+  if (orderTicker) clearInterval(orderTicker);
+  orderTicker = setInterval(tickCountdowns, 1000);
+}
+async function orderAction(button) {
+  const { id, orderAction: action } = button.dataset;
+  button.disabled = true;
+  try {
+    const body =
+      action === "pay"
+        ? JSON.stringify({
+            method: document.getElementById("method-" + id).value,
+          })
+        : undefined;
+    await api(`/api/orders/${id}/${action}`, { method: "POST", body });
+    toast(
+      action === "pay"
+        ? "模拟支付成功，没有发生真实扣款"
+        : "订单已取消，库存已归还",
+    );
+    await Promise.all([loadOrders(), loadProducts()]);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+async function loadMessages() {
+  const data = await api("/api/messages");
+  $("#pool-stats").innerHTML = [
+    [data.pool.size, "已创建线程"],
+    [data.pool.active, "正在执行"],
+    [data.pool.queued, "内存中排队"],
+    [data.pool.maximum, "最大线程数"],
+  ]
+    .map(
+      ([n, label]) =>
+        `<div class="stat"><span>${label}</span><strong>${n}</strong></div>`,
+    )
+    .join("");
+  $("#notifications").innerHTML =
+    data.notifications
+      .map(
+        (n) =>
+          `<article class="notice"><span class="eyebrow muted">订单通知</span><p>${esc(n.content)}</p><time>${esc(time(n.createdAt))}</time></article>`,
+      )
+      .join("") ||
+    '<p class="empty">还没有通知。下一次下单后，在这里等一小会儿。</p>';
+  $("#events").innerHTML =
+    data.events
+      .map(
+        (e) =>
+          `<article class="event"><div class="event-title"><strong>${esc(e.eventType)}</strong><span class="badge ${esc(e.status)}">${statusText[e.status]}</span></div><p>${esc(e.content)}</p><small>失败 ${e.attempts} 次 · ${esc(time(e.createdAt))}${e.lastError ? ` · ${esc(e.lastError)}` : ""}</small>${e.status === "DEAD" ? `<div><button class="button outline small" data-retry="${e.id}">重新投递</button></div>` : ""}</article>`,
+      )
+      .join("") || '<p class="empty">消息队列目前没有你的投递记录。</p>';
+}
+async function showView(view) {
+  if (view !== "shop" && !user) {
+    location.href = "/login";
+    return;
+  }
+  currentView = view;
+  document
+    .querySelectorAll(".view")
+    .forEach((el) => el.classList.toggle("hidden", el.id !== view + "-view"));
+  document
+    .querySelectorAll("[data-view]")
+    .forEach((el) => el.classList.toggle("active", el.dataset.view === view));
+  // 离开订单页就停掉倒计时：看不见的东西不该继续占用定时器。
+  if (view !== "orders" && orderTicker) {
+    clearInterval(orderTicker);
+    orderTicker = null;
+  }
+  try {
+    if (view === "orders") await loadOrders();
+    if (view === "messages") await loadMessages();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  if (button.dataset.view) await showView(button.dataset.view);
+  if (button.dataset.category) {
+    category = button.dataset.category;
+    document
+      .querySelectorAll("[data-category].chip")
+      .forEach((el) => el.classList.toggle("active", el === button));
+    renderProducts();
+  }
+  if (button.dataset.add) await addToCart(Number(button.dataset.add));
+  if (button.dataset.adjust)
+    await adjust(Number(button.dataset.adjust), Number(button.dataset.delta));
+  if (button.dataset.remove && !busy) await setQuantity(Number(button.dataset.remove), 0);
+  if (button.dataset.orderAction) await orderAction(button);
+  if (button.dataset.retry) {
+    button.disabled = true;
+    try {
+      await api(`/api/messages/${button.dataset.retry}/retry`, {
+        method: "POST",
+      });
+      toast("已放回待投递队列");
+      await loadMessages();
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+});
+$("#search").addEventListener("input", renderProducts);
+$("#checkout").addEventListener("click", checkout);
+$("#replay").addEventListener("click", replay);
+let refreshing = false;
+setInterval(async () => {
+  if (currentView !== "messages" || document.hidden || refreshing) return;
+  refreshing = true;
+  try {
+    await loadMessages();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    refreshing = false;
+  }
+}, 3000);
+(async () => {
+  // 登录状态下先把游客暂存并进服务端购物袋，再拉货架，首屏显示的就是完整购物车。
+  if (user) await mergeGuestCart();
+  try {
+    await loadProducts();
+  } catch (error) {
+    $("#products").innerHTML =
+      '<p class="empty">货架暂时加载失败，请刷新页面重试。</p>';
+    toast(error.message, true);
+  }
+})();

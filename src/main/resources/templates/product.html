@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title th:text="${product.name} + ' · 小小商城'">商品 · 小小商城</title>
+    <link rel="icon" type="image/svg+xml" href="/art/bag.svg" />
+    <link rel="stylesheet" href="/css/style.css" />
+    <script src="/js/product.js" defer></script>
+  </head>
+  <body th:attr="data-user=${username}">
+    <header class="site-header">
+      <a class="brand" href="/"
+        ><span class="brand-mark">小</span>小小商城<span class="brand-en"
+          >EVERYDAY GOODS</span
+        ></a
+      >
+      <a class="button outline small" href="/#catalog">← 继续逛逛</a>
+      <div class="account">
+        <a class="button dark small" th:if="${username == ''}" href="/login"
+          >登录体验 ↗</a
+        ><th:block th:if="${username != ''}"
+          ><span class="avatar" aria-hidden="true">S</span
+          ><span th:text="${username}"></span>
+          <form th:action="@{/logout}" method="post">
+            <button class="text-button" type="submit">退出</button>
+          </form></th:block
+        >
+      </div>
+    </header>
+    <main>
+      <nav class="breadcrumb" aria-label="路径">
+        <a href="/">首页</a><i>›</i><a href="/#catalog">今日好物</a><i>›</i
+        ><span th:text="${product.name}">商品</span>
+      </nav>
+      <section
+        class="product-detail"
+        th:attr="data-id=${product.id}, data-name=${product.name}, data-stock=${product.stock}"
+      >
+        <div
+          class="detail-gallery"
+          th:attr="data-category=${product.category}"
+        >
+          <span class="product-tag" th:text="${product.category}">分类</span>
+          <img
+            th:src="@{'/art/' + ${product.illustration} + '.svg'}"
+            th:alt="${product.name}"
+          />
+        </div>
+        <div class="detail-info">
+          <span class="eyebrow muted"
+            ><i></i> PRODUCT / <span th:text="${product.id}">01</span></span
+          >
+          <h1 th:text="${product.name}">商品名称</h1>
+          <p class="detail-desc" th:text="${product.description}">商品描述</p>
+          <div class="detail-price-row">
+            <div class="price">
+              <small>¥</small><span
+                th:text="${#numbers.formatDecimal(product.price, 1, 2)}"
+                >0.00</span
+              >
+            </div>
+            <span
+              class="stock"
+              th:text="${product.stock > 0} ? ${'现货 ' + product.stock + ' 件'} : '暂时售罄'"
+              >现货</span
+            >
+          </div>
+          <div class="detail-actions">
+            <div class="quantity" th:if="${product.stock > 0}">
+              <button type="button" id="qty-minus" aria-label="减少数量">
+                −
+              </button>
+              <span id="qty">1</span>
+              <button type="button" id="qty-plus" aria-label="增加数量">
+                +
+              </button>
+            </div>
+            <button
+              class="button green wide"
+              id="add-to-cart"
+              th:disabled="${product.stock == 0}"
+            >
+              <span th:if="${product.stock > 0}">加入购物袋 <span>→</span></span>
+              <span th:if="${product.stock == 0}">暂时售罄</span>
+            </button>
+            <button class="button outline wide" id="ask-assistant" type="button">
+              问问购物助手 ✦
+            </button>
+          </div>
+          <p class="cart-note">
+            下单后可在「我的订单」中模拟支付，支持取消并自动归还库存。<br />学习演示项目，不产生真实交易。
+          </p>
+        </div>
+      </section>
+    </main>
+    <footer>
+      <a class="brand" href="/"><span class="brand-mark">小</span>小小商城</a
+      ><span>认真生活，也认真学习。</span
+      ><span>Spring Boot 学习项目 / 2026</span>
+    </footer>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  </body>
+</html>
