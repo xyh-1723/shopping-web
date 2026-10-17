@@ -62,6 +62,27 @@ import org.springframework.transaction.support.TransactionTemplate;
  * 命中本项目自己起的履约约束名 → 409 业务码；命中不了 → 原样抛出（继续是 500），
  * 免得把真正的数据层 bug 也藏进「业务冲突」。
  * 由 {@code FulfillmentHttpGuardTest} 守着。
+ *
+ * <h4>诚实边界：这三条约束名在当前实现下都<b>构造不可达</b></h4>
+ *
+ * <p>必须先说清楚，免得后面读代码的人以为这里守着一条天天在跑的路径：
+ * 每一条写 UPDATE 都把前置条件写在 WHERE 里，<b>有资格被它更新的行必然满足对应的 CHECK</b>。
+ * 以 {@code ck_order_fulfillment_needs_paid}（{@code fulfillment_status='NONE' OR status='PAID'}）
+ * 为例：{@code markShipped} 的 WHERE 里有 {@code status='PAID'}，能被它更新的行一定满足这条约束，
+ * 约束因此<b>没有机会拒绝这一次 UPDATE</b>；未支付的订单是先在 WHERE 上落空（影响 0 行 →
+ * {@code INVALID_STATE}），根本走不到约束那一步。三条约束同理。
+ *
+ * <p>所以这里守的不是「一条现在会发生的路径」，而是一个<b>失败形态的选择（failure-mode policy）</b>：
+ * 以后谁把 WHERE 挪走、漏写一个时刻、或加了一条新迁移却忘了同步状态机，数据库仍然会把他打回——
+ * 区别在于打回之后对外是「409 + {@code FULFILLMENT_*} 语义」，
+ * 还是「500 + 一条被调用方记成可忽略异常、线上彻底静默的堆栈」。
+ * <b>这不是不一致性，是刻意的失败形态下限。</b>
+ * 因此也不允许反过来把它写成「解释了某条真实可达路径」——那样是伪造事实。
+ *
+ * <p>非死代码的证明方式见 {@code FulfillmentHttpGuardTest}：翻译层本身由「在写调用上注入约束异常」
+ * 的用例守着（删掉翻译层立刻变红），而「三个约束名在现实里能被分别识别」由
+ * {@code realH2ConstraintNamesAreToldApart} 用<b>真实 H2 抛出的</b>异常原文证明，
+ * 不是手写字符串。
  */
 @Service
 public class FulfillmentService {
@@ -78,6 +99,10 @@ public class FulfillmentService {
      * 或漏写了某个时刻，约束照样把他打回）。这里做的是「异常已经逃逸出来之后，别让 HTTP 层
      * 把它当 Internal Server Error 吐出去」——订单没付钱不能发货是一个<b>说得清</b>的业务
      * 结果，不该伪装成服务器故障，也不该在调用方日志里被归成「可忽略异常」而彻底静默。
+     *
+     * <p><b>三条都不代表一条今天可达的路径</b>：理由写在类注释「诚实边界」一节
+     * （UPDATE 的 WHERE 已经保证了对应的 CHECK）。删掉它们的代价不是「现在就出错」，
+     * 而是失败形态从 409 退回 500。
      */
     private enum FulfillmentConstraint {
         NEEDS_PAID("ck_order_fulfillment_needs_paid", "FULFILLMENT_NEEDS_PAID",
@@ -105,15 +130,24 @@ public class FulfillmentService {
      * （唯一键、非空、别的表的 CHECK）一律原样抛出，让它们继续是 500——把未知的数据层错误
      * 也一并翻译成「业务冲突」，等于把真正的 bug 藏起来。
      *
+     * <p>可见性是<b>包级</b>而不是 {@code private}：{@code FulfillmentHttpGuardTest} 与它同包，
+     * 要用<b>真实 H2 抛出的</b>约束异常直接喂进来，证明三个约束名在现实里能被分别识别；
+     * 它仍然不是对外端口（类与测试都在 {@code order.internal} 里），
+     * 而「仓储的写调用不许为了测试方便而 public」由
+     * {@code FulfillmentHttpGuardTest#fulfillmentWriteMethodsStayInternal} 反射守着。
+     *
      * @return 命中已知履约约束时的业务异常；否则返回 {@code null}，由调用方原样抛出。
      */
-    private static BusinessException translate(DataIntegrityViolationException e) {
+    static BusinessException translate(DataIntegrityViolationException e) {
         String text = constraintText(e);
         for (FulfillmentConstraint known : FulfillmentConstraint.values()) {
-            // 按「名字 + 冒号」匹配，而不是裸子串：H2 的报错形如
-            //   Check constraint violation: "CK_ORDER_FULFILLMENT_NEEDS_PAID: (...)"
-            // 裸子串匹配会让 CK_ORDER_FULFILLMENT_STATUS 命中 NEEDS_PAID 这一条
-            // （前者是后者的前缀），于是返回的业务码指错约束——比不翻译更难排查。
+            // 按「名字 + 冒号」匹配，而不是裸子串：H2 的真实报错形如
+            //   Check constraint violation: "CK_ORDER_FULFILLMENT_NEEDS_PAID: "
+            // （这句原文是 {@code FulfillmentHttpGuardTest#realH2ConstraintNamesAreToldApart}
+            // 真跑出来的，不是照文档抄的）。
+            // 现有三条约束名互不为前缀，所以冒号<b>今天不承载区分功能</b>，它防的是以后新增的
+            // 「以既有名字为前缀」的约束名（例如 ck_order_fulfillment_status_v2）被误认成
+            // ck_order_fulfillment_status —— 指错约束比不翻译更难排查。
             // 两边都取大写后再比：迁移脚本里写的是小写，H2 报出来的是大写。
             String marker = known.constraintName.toUpperCase(Locale.ROOT) + ":";
             if (text.contains(marker)) {

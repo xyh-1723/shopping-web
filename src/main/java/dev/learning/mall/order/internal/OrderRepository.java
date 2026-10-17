@@ -123,13 +123,7 @@ public class OrderRepository {
      * 在发货这一刻落库：与 {@code expiresAt} 同一个道理——运营事后把 10 天改成 7 天，
      * 不该让已经在这批路上的订单一起跳变。
      */
-    /**
-     * 声明为 public 只为让「约束异常 → 业务结果」这条边界能被测试直接打到：
-     * {@code FulfillmentHttpGuardTest} 要在这两处写调用上注入真实的
-     * {@code DataIntegrityViolationException}，私有可见性会让测试拿不到它们。
-     * 它们是本模块的仓储方法，不是对外端口（类仍在 {@code order.internal}）。
-     */
-    public int markShipped(String id, String staff, String shippingNo, LocalDateTime shippedAt, LocalDateTime autoReceiveAt) {
+    int markShipped(String id, String staff, String shippingNo, LocalDateTime shippedAt, LocalDateTime autoReceiveAt) {
         return jdbc.sql("UPDATE mall_order SET fulfillment_status='SHIPPED',shipped_at=:now,shipped_by=:staff,"
                         + "shipping_no=:no,auto_receive_at=:auto"
                         + " WHERE id=:id AND status='PAID' AND fulfillment_status='NONE'")
@@ -145,7 +139,7 @@ public class OrderRepository {
      * 依然能被这条 UPDATE 命中（影响 1 行），所以这条校验只能在 WHERE 里，不能挪到
      * 调用方的 if 里——挪到 if 里，调用方漏判一次就全线失守。
      */
-    public int markReceived(String id, String user, LocalDateTime receivedAt) {
+    int markReceived(String id, String user, LocalDateTime receivedAt) {
         return jdbc.sql("UPDATE mall_order SET fulfillment_status='RECEIVED',received_at=:now"
                         + " WHERE id=:id AND username=:user AND fulfillment_status='SHIPPED'")
                 .param("id", id).param("user", user).param("now", receivedAt).update();
