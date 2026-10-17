@@ -12,6 +12,12 @@ mall:
   # 让「库存有没有归还」这类断言随执行时序飘。需要时由 OrderExpiryTest 显式打开。
   order:
     auto-close-enabled: false
+    # 自动收货同样默认关闭，且把扫描间隔拉到一小时（FulfillmentScheduler 读的是这里的占位符）：
+    # 后台定时扫描会推进正在被断言的订单，让「这一步走到哪了」随执行时序飘。
+    # 需要时由 FulfillmentFlowTest 显式打开开关并直接调用扫描器。
+    auto-receive-enabled: false
+    auto-receive-scan-delay-ms: 3600000
+    auto-receive-initial-delay-ms: 3600000
   assistant:
     memory:
       # 测试里默认关掉「轮后自动抽取偏好」：它会在线程池上异步再跑一次模型/写库，

@@ -107,6 +107,97 @@ public class OrderRepository {
         return jdbc.sql("UPDATE mall_order SET status='CANCELLED',close_reason=:reason,closed_at=:closedAt WHERE id=:id AND status='PENDING'")
                 .param("id", id).param("reason", reason).param("closedAt", closedAt).update();
     }
+
+    // ——————————————————— 履约：四条（连同自动收货共五条）状态迁移 ———————————————————
+
+    /**
+     * 发货：把履约状态从 {@code NONE} 推到 {@code SHIPPED}（§2.6 第一式）。
+     *
+     * <p><b>前置条件写死在 WHERE 里</b>，与 {@link #markClosed} 同一套写法：
+     * 影响 1 行 = 「这次状态转换是我完成的」，于是写 {@code shipped_at}、发
+     * {@code ORDER_SHIPPED} 也是我的责任；影响 0 行 = 别人已经处理过，调用方安静跳过。
+     * {@code status='PAID'} 这一半是「钱到账才配货」的落点——越过它的代价是
+     * {@code ck_order_fulfillment_needs_paid} 把这次发货当场打回。
+     *
+     * <p>{@code autoReceiveAt} 由调用方算好传入（= 发货时刻 + 配置的自动收货天数），
+     * 在发货这一刻落库：与 {@code expiresAt} 同一个道理——运营事后把 10 天改成 7 天，
+     * 不该让已经在这批路上的订单一起跳变。
+     */
+    int markShipped(String id, String staff, String shippingNo, LocalDateTime shippedAt, LocalDateTime autoReceiveAt) {
+        return jdbc.sql("UPDATE mall_order SET fulfillment_status='SHIPPED',shipped_at=:now,shipped_by=:staff,"
+                        + "shipping_no=:no,auto_receive_at=:auto"
+                        + " WHERE id=:id AND status='PAID' AND fulfillment_status='NONE'")
+                .param("id", id).param("staff", staff).param("no", shippingNo)
+                .param("now", shippedAt).param("auto", autoReceiveAt).update();
+    }
+
+    /**
+     * 买家确认收货：{@code SHIPPED → RECEIVED}（§2.6 第二式）。
+     *
+     * <p>{@code username = :user} 是<b>归属校验</b>，不是可选装饰：没有它，任何人都能替别人
+     * 点掉「确认收货」，而这一步直接决定退款窗口与售后起算点。去掉它以后，别人的订单
+     * 依然能被这条 UPDATE 命中（影响 1 行），所以这条校验只能在 WHERE 里，不能挪到
+     * 调用方的 if 里——挪到 if 里，调用方漏判一次就全线失守。
+     */
+    int markReceived(String id, String user, LocalDateTime receivedAt) {
+        return jdbc.sql("UPDATE mall_order SET fulfillment_status='RECEIVED',received_at=:now"
+                        + " WHERE id=:id AND username=:user AND fulfillment_status='SHIPPED'")
+                .param("id", id).param("user", user).param("now", receivedAt).update();
+    }
+
+    /** 买家确认完成：{@code RECEIVED → COMPLETED}（§2.6 第三式），同样带归属校验。 */
+    int markCompleted(String id, String user, LocalDateTime completedAt) {
+        return jdbc.sql("UPDATE mall_order SET fulfillment_status='COMPLETED',completed_at=:now"
+                        + " WHERE id=:id AND username=:user AND fulfillment_status='RECEIVED'")
+                .param("id", id).param("user", user).param("now", completedAt).update();
+    }
+
+    /**
+     * 自动收货第一步：{@code SHIPPED → RECEIVED}（§2.3 状态图要求、§2.6 语句模板漏掉的那一条）。
+     *
+     * <p>系统路径<b>不带</b> username，与 {@link #lock(String)} 同一个道理：自动收货不是
+     * 任何一次用户请求，让它先知道「是谁在操作」是没有意义的。
+     *
+     * <p>{@code auto_receive_at <= :due} 在这里是<b>第二道</b>到期校验（第一道在
+     * {@link #dueForAutoReceive}）：候选集挑出来之后到拿到行锁之间，买家可能已经自己收货、
+     * 也可能有人改了调度时刻；规则不该依赖「候选集一定没挑错」。
+     */
+    int markAutoReceived(String id, LocalDateTime receivedAt, LocalDateTime due) {
+        return jdbc.sql("UPDATE mall_order SET fulfillment_status='RECEIVED',received_at=:now"
+                        + " WHERE id=:id AND fulfillment_status='SHIPPED' AND auto_receive_at<=:due")
+                .param("id", id).param("now", receivedAt).param("due", due).update();
+    }
+
+    /**
+     * 自动收货第二步：{@code RECEIVED → COMPLETED}（§2.6 第四式原样保留）。
+     *
+     * <p>它<b>不能</b>与 {@link #markAutoReceived} 合成一条 {@code SHIPPED → COMPLETED}：
+     * 那样写出来 {@code received_at} 仍是 NULL，而 {@code COMPLETED} 要求三个时刻齐全，
+     * {@code ck_order_fulfillment_fields} 会把整条语句打回——「必须两步」是数据库逼出来的，
+     * 不是排版偏好。见 {@code FulfillmentFlowTest#skipReceivedCannotReachCompleted}。
+     */
+    int markAutoCompleted(String id, LocalDateTime completedAt, LocalDateTime due) {
+        return jdbc.sql("UPDATE mall_order SET fulfillment_status='COMPLETED',completed_at=:now"
+                        + " WHERE id=:id AND fulfillment_status='RECEIVED' AND auto_receive_at<=:due")
+                .param("id", id).param("now", completedAt).param("due", due).update();
+    }
+
+    /**
+     * 到期该被自动收货的订单：{@code SHIPPED}（等着自动确认收货）与 {@code RECEIVED}（等着自动完成）。
+     *
+     * <p>{@code auto_receive_at IS NOT NULL} 是刻意的：没有到期时刻的订单永远不该被自动推进，
+     * 与 {@link #expiredPending} 里 {@code expires_at IS NOT NULL} 同一个道理——
+     * 「没有截止时间」不等于「早于任何时刻」。
+     */
+    List<String> dueForAutoReceive(LocalDateTime now, int limit) {
+        return jdbc.sql("""
+                        SELECT id FROM mall_order
+                         WHERE fulfillment_status IN ('SHIPPED','RECEIVED')
+                           AND auto_receive_at IS NOT NULL AND auto_receive_at <= :now
+                         ORDER BY auto_receive_at, id
+                         LIMIT :limit""")
+                .param("now", now).param("limit", limit).query(String.class).list();
+    }
     OrderView view(OrderRow row) {
         return new OrderView(row.id(), row.status(), row.total(), row.subtotal(), row.discount(),
                 row.shippingFee(), row.payAmount(), row.paymentMethod(), row.paymentReceipt(),

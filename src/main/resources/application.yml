@@ -120,6 +120,12 @@ mall:
     auto-close-scan-delay-ms: 60000
     auto-close-initial-delay-ms: 20000
     auto-close-max-per-scan: 200 # 单轮上限。到期订单被关掉后即离开结果集，不存在队尾饥饿
+    auto-receive-days: 10        # 发货后多少天自动确认收货；在发货那一刻算成 auto_receive_at 落库，
+                                 # 之后改这个数字不会让在路上的订单一起跳变
+    auto-receive-enabled: true   # 关掉它 = 回到「买家不点收货就永远在途」的旧行为，仅用于排障
+    auto-receive-scan-delay-ms: 60000
+    auto-receive-initial-delay-ms: 20000
+    auto-receive-max-per-scan: 200
   # 主动服务：关注（降价/补货提醒）+ 关联推荐。
   # 提醒由两条路触发：商品变更事件（及时）+ 定时扫描（兜底，保证不漏）。
   proactive:
