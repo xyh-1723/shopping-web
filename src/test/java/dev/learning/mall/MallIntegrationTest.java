@@ -5,6 +5,7 @@ import dev.learning.mall.common.BusinessException;
 import dev.learning.mall.messaging.internal.*;
 import dev.learning.mall.order.api.*;
 import dev.learning.mall.order.internal.*;
+import java.time.LocalDateTime;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.IntFunction;
@@ -50,7 +51,20 @@ class MallIntegrationTest {
     int count(String table) { return jdbc.sql("SELECT COUNT(*) FROM " + table).query(Integer.class).single(); }
     String eventId() { return jdbc.sql("SELECT id FROM outbox_event LIMIT 1").query(String.class).single(); }
     String eventStatus(String id) { return jdbc.sql("SELECT status FROM outbox_event WHERE id=:id").param("id", id).query(String.class).single(); }
-    void dueNow(String id) { jdbc.sql("UPDATE outbox_event SET next_attempt_at=DATEADD('SECOND', -1, CURRENT_TIMESTAMP) WHERE id=:id").param("id", id).update(); }
+    /**
+     * 把事件的重试时间拨到过去，让「到点就该消费」不再取决于取时的先后。
+     *
+     * <p>基准用 <b>JVM 时钟</b>而不是数据库的 {@code CURRENT_TIMESTAMP}：
+     * {@code MessageProcessor} 判断「到没到重试时间」用的是 {@code LocalDateTime.now()}，
+     * 而实测 H2 的 CURRENT_TIMESTAMP 有 49/50 的概率比 JVM 时钟快，
+     * 拿数据库时间做基准等于让两个时钟互相较劲——事件刚建好就去消费，会偶发地被整条跳过。
+     *
+     * <p>凡是「建完事件立刻消费」的地方都要先调它一次，否则用例会时红时绿。
+     */
+    void dueNow(String id) {
+        jdbc.sql("UPDATE outbox_event SET next_attempt_at=:t WHERE id=:id")
+                .param("t", LocalDateTime.now().minusSeconds(1)).param("id", id).update();
+    }
 
     @Test void publicPagesAndProtectedEndpoints() throws Exception {
         mvc.perform(get("/")).andExpect(status().isOk()).andExpect(content().string(org.hamcrest.Matchers.containsString("小小商城")));
@@ -80,7 +94,7 @@ class MallIntegrationTest {
         mvc.perform(post("/api/orders/"+order.id()+"/cancel").with(user("classmate")).with(csrf())).andExpect(status().isNotFound());
         mvc.perform(post("/api/orders/"+order.id()+"/pay").with(user("classmate")).with(csrf())
                 .contentType("application/json").content("{\"method\":\"DEMO_CARD\"}")).andExpect(status().isNotFound());
-        processor.process(eventId());
+        String delivered = eventId(); dueNow(delivered); processor.process(delivered);
         mvc.perform(get("/api/orders").with(user("classmate"))).andExpect(jsonPath("$.length()").value(0));
         mvc.perform(get("/api/messages").with(user("classmate")))
                 .andExpect(jsonPath("$.events.length()").value(0)).andExpect(jsonPath("$.notifications.length()").value(0));
@@ -181,13 +195,13 @@ class MallIntegrationTest {
         assertThat(count("outbox_event")).isEqualTo(2);
     }
     @Test void duplicateConsumersProduceOneNotification() throws Exception {
-        create(); String id = eventId(); parallel(12, i -> { processor.process(id); return i; });
+        create(); String id = eventId(); dueNow(id); parallel(12, i -> { processor.process(id); return i; });
         assertThat(count("notification")).isEqualTo(1); assertThat(eventStatus(id)).isEqualTo("DELIVERED");
     }
     @Test void notificationAndAcknowledgementRollBackTogetherAndRetrySucceeds() {
         create(); String id = eventId();
         doAnswer(invocation -> { invocation.callRealMethod(); throw new IllegalStateException("写入通知后失败"); }).when(sink).deliver(any());
-        worker.handle(id);
+        dueNow(id); worker.handle(id);
         assertThat(count("notification")).isZero(); assertThat(eventStatus(id)).isEqualTo("PENDING");
         assertThat(jdbc.sql("SELECT attempts FROM outbox_event WHERE id=:id").param("id",id).query(Integer.class).single()).isEqualTo(1);
         reset(sink); dueNow(id); worker.handle(id);
@@ -196,14 +210,15 @@ class MallIntegrationTest {
     @Test void retryBackoffDeadLetterAndOwnerReplay() throws Exception {
         create(); String id = eventId();
         doThrow(new IllegalStateException("故障")).when(sink).deliver(any());
-        worker.handle(id); worker.handle(id); // 尚未到重试时间，不再次执行消费。
+        dueNow(id); worker.handle(id); worker.handle(id); // 尚未到重试时间，不再次执行消费。
         verify(sink,times(1)).deliver(any());
         for (int i=1; i<5; i++) { dueNow(id); worker.handle(id); }
         assertThat(eventStatus(id)).isEqualTo("DEAD"); assertThat(count("notification")).isZero();
         worker.handle(id); verify(sink,times(5)).deliver(any());
         mvc.perform(post("/api/messages/"+id+"/retry").with(user("classmate")).with(csrf())).andExpect(status().isConflict());
         mvc.perform(post("/api/messages/"+id+"/retry").with(user("student")).with(csrf())).andExpect(status().isOk());
-        reset(sink); worker.handle(id);
+        // 重放把 next_attempt_at 重置成数据库的 CURRENT_TIMESTAMP（主代码行为），同样要先拨到过去。
+        reset(sink); dueNow(id); worker.handle(id);
         assertThat(eventStatus(id)).isEqualTo("DELIVERED"); assertThat(count("notification")).isEqualTo(1);
     }
     @Test void inventoryWriteRequiresAnExistingTransaction() {
