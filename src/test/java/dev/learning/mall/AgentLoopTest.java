@@ -110,9 +110,16 @@ class AgentLoopTest {
         return ChatResponse.builder().aiMessage(AiMessage.from(text)).build();
     }
 
-    private String stopReason() {
-        return jdbc.sql("SELECT stop_reason FROM assistant_run ORDER BY created_at DESC, id LIMIT 1")
-                .query(String.class).optional().orElse(null);
+    /**
+     * 取指定会话最近一次 run 的停止原因。
+     *
+     * <p>必须传 conversation_id：H2 会缓存 {@code CURRENT_TIMESTAMP} 让多条 run 的
+     * {@code created_at} 并列，并列时又靠随机 UUID 的 {@code id} 兜底排序，
+     * 于是「全表取最近一条」随时会取到<b>别的会话</b>的 run。
+     * 详见 {@link StopReasons}，守护测试见 {@link StopReasonSessionScopingTest}。
+     */
+    private String stopReason(String conversationId) {
+        return StopReasons.latest(jdbc, conversationId);
     }
 
     private int stepCount() {
@@ -149,7 +156,7 @@ class AgentLoopTest {
         ConversationView conv = runOneTurn(mock, "帮我找找杯子，顺便看看我的订单");
 
         assertThat(conv).isNotNull();
-        assertThat(stopReason()).isEqualTo("DONE");
+        assertThat(stopReason(conv.id())).isEqualTo("DONE");
         assertThat(stepToolNames()).containsExactlyInAnyOrder("searchProducts", "myOrders");
         assertThat(stepStatuses()).containsOnly("OK");
         // 两个工具的结果都回到了模型上下文里，模型才可能同时回答两件事。
@@ -207,7 +214,7 @@ class AgentLoopTest {
         SendMessageResponse resp = service.sendDetailed(conv.id(), "student", "看看商品 99 的详情");
 
         assertThat(resp.reply().content()).contains("换个编号");
-        assertThat(stopReason()).isEqualTo("DONE");
+        assertThat(stopReason(conv.id())).isEqualTo("DONE");
         assertThat(stepStatuses()).containsExactly("ERROR");
         // 模型在第二轮看到的是结构化错误（含可行动的提示），而不是一个 500。
         List<ChatMessage> second = lastRequest(mock).messages();
@@ -261,7 +268,7 @@ class AgentLoopTest {
         ConversationView conv = service.create("student", null);
         SendMessageResponse resp = service.sendDetailed(conv.id(), "student", "我的订单呢");
 
-        assertThat(stopReason()).isEqualTo("STALLED");
+        assertThat(stopReason(conv.id())).isEqualTo("STALLED");
         // 第一轮真正执行，第二轮短路成 DUPLICATE，第三轮直接停下（不再产生步）。
         assertThat(stepStatuses()).containsExactly("OK", "DUPLICATE");
         assertThat(stepCount()).isEqualTo(2);
@@ -286,7 +293,7 @@ class AgentLoopTest {
         ConversationView conv = service.create("student", null);
         SendMessageResponse resp = service.sendDetailed(conv.id(), "student", "有杯子吗");
 
-        assertThat(stopReason()).isEqualTo("MAX_STEPS");
+        assertThat(stopReason(conv.id())).isEqualTo("MAX_STEPS");
         assertThat(resp.reply().content()).contains("拆开问我");
         // 预算用尽就该停：模型只被调用了一轮，不再继续烧额度。
         verify(mock, times(1)).chat(any(ChatRequest.class));

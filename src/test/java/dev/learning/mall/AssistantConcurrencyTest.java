@@ -297,7 +297,7 @@ class AssistantConcurrencyTest {
             // 关键：降级为顺序执行后每条工具都跑完了，没有一条变成 TIMEOUT。
             // 若这里换成「排队等许可」，超时会让所有用户一起拿到失败。
             assertThat(stepStatuses()).containsOnly("OK");
-            assertThat(stopReason()).isEqualTo("DONE");
+            assertThat(stopReason(conv.id())).isEqualTo("DONE");
             assertThat(resp.reply().content()).contains("杯子");
         } finally {
             permits.release(drained);
@@ -399,9 +399,19 @@ class AssistantConcurrencyTest {
         return n == null ? 0 : n;
     }
 
-    private String stopReason() {
-        return jdbc.sql("SELECT stop_reason FROM assistant_run ORDER BY created_at DESC, id LIMIT 1")
-                .query(String.class).optional().orElse(null);
+    /**
+     * 取指定会话最近一次 run 的停止原因。
+     *
+     * <p>必须传 conversation_id：H2 缓存 {@code CURRENT_TIMESTAMP} 让多条 run 的
+     * {@code created_at} 并列，并列时又靠随机 UUID 的 {@code id} 兜底排序，
+     * 于是「全表取最近一条」会取到<b>别人的</b> run。
+     *
+     * <p>本类是最容易踩到的地方：并发用例会同时产生多条属于<b>不同会话</b>的 run，
+     * 它们时间戳并列，取到哪一行取决于 UUID 字典序。
+     * 详见 {@link StopReasons}，守护测试见 {@link StopReasonSessionScopingTest}。
+     */
+    private String stopReason(String conversationId) {
+        return StopReasons.latest(jdbc, conversationId);
     }
 
     private List<String> stepStatuses() {
