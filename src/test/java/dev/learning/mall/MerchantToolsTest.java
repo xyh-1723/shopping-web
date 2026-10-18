@@ -45,6 +45,10 @@ import org.springframework.test.context.ActiveProfiles;
  *       {@code approveRefund}，第一道闸门（清单里根本没有这个工具）会先拦下，
  *       第二道闸门（方法内的角色硬校验）根本没被执行到——那条断言是<b>空跑</b>的。
  *       所以这里刻意拿<b>商家</b>的 bundle 配<b>非商家</b>的 actor，单独验证第二道闸门。</li>
+ *   <li><b>退款是两档权限，不是一档</b>：队列 = 经营侧只读（STAFF + MERCHANT），
+ *       审批 = 仅商家。与 HTTP 同一套答案（{@code GET /api/refunds/pending} →
+ *       {@code hasAnyRole("STAFF","MERCHANT")}，{@code POST .../approve|reject} →
+ *       {@code hasRole("MERCHANT")}）。用例⑤把这两档分开断言，互不掩盖。</li>
  * </ul>
  */
 @SpringBootTest
@@ -187,29 +191,39 @@ class MerchantToolsTest {
         ToolRegistry.Execution out = exec(registry.forActor(actors.resolve(MERCHANT)), customer,
                 "approveRefund", "{\"refundId\":\"" + queued.id() + "\"}");
 
-        assertThat(out.text()).contains("FORBIDDEN");
+        // 先断言审计，再看文本：文本只是给模型看的形状，审计才是「越权真被挡住」的证据。
         assertThat(denyCount(CUSTOMER, "TOOL_FORBIDDEN_approveRefund"))
                 .as("越权尝试必须写一条 DENY 审计：规则会漏，漏了必须有痕迹")
                 .isEqualTo(1);
+        assertThat(out.text()).contains("FORBIDDEN");
+
+        // 队列是经营侧只读，也不对普通顾客开放——放宽给店员不等于放宽给所有人。
+        ToolRegistry.Execution queue = exec(registry.forActor(actors.resolve(MERCHANT)), customer,
+                "pendingRefundQueue", "{}");
+        assertThat(denyCount(CUSTOMER, "TOOL_FORBIDDEN_pendingRefundQueue")).isEqualTo(1);
+        assertThat(queue.text()).contains("FORBIDDEN");
+
         assertThat(refundStatus(queued.id())).isEqualTo(RefundView.STATUS_PENDING_APPROVAL);
         assertThat(WalletProbe.balanceCents(jdbc, u)).as("被拒的调用绝不能放款").isEqualTo(before);
         assertThat(WalletProbe.deltas(jdbc, u, "REFUND")).isEmpty();
     }
 
-    // ——————————————————— ⑤ 店员越权（待产品拍板） ———————————————————
+    // ——————————————————— ⑤ 店员：看得见队列，批不了 ———————————————————
 
     /**
-     * <b>这条是当前实现的快照，不是已定稿的规则。</b>
+     * 已拍板的口径：<b>队列 = 经营侧只读（STAFF + MERCHANT）；审批 = 仅商家</b>，
+     * 与 HTTP 层同一套答案（{@code GET /api/refunds/pending} →
+     * {@code hasAnyRole("STAFF","MERCHANT")}，{@code POST .../approve|reject} →
+     * {@code hasRole("MERCHANT")}）。
      *
-     * <p>「审批是商家的活」这一条目前实现成：店员也拿不到审批工具（{@code isMerchant()} 严格判定）。
-     * 理由是 {@code SecurityConfig} 里那条 {@code hasRole("MERCHANT")} 的注释——
-     * 让店员能批退款，等于打开「店员自己申请退款、自己批准」这条路。
-     * 如果将来产品决定 STAFF 也该能审批，这里和 {@code MerchantTools#denied} 一起改。
+     * <p>三条断言必须分开写：「看得见」只归队列，批准与驳回各一条。
+     * 合成一句的话，把决策判据误放宽成 {@code isOperatingSide()} 这种改动会藏在
+     * 「队列那条是绿的」后面不被发现。
      */
     @Test
-    @DisplayName("⑤ 店员同样被拒（当前口径：审批是商家的活），且领域层再挡一次")
-    void staffIsDeniedToo() {
-        String u = buyer("deny-staff");
+    @DisplayName("⑤ 店员看得见待审批队列；批准与驳回各自被拒、各留一条 DENY 审计")
+    void staffSeesQueueButCannotDecide() {
+        String u = buyer("staff");
         OrderView paid = payWithWallet(u);
         RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "不想要了");
         AssistantActor staff = actors.resolve(STAFF);
@@ -217,11 +231,35 @@ class MerchantToolsTest {
         assertThat(staff.isStaff()).isTrue();
         assertThat(staff.isMerchant()).as("前提：admin 不带 ROLE_MERCHANT（并列角色）").isFalse();
 
-        ToolRegistry.Execution out = exec(registry.forActor(actors.resolve(MERCHANT)), staff,
-                "approveRefund", "{\"refundId\":\"" + queued.id() + "\"}");
+        // ① 队列：店员自己的工具包里就有，而且真的查得到那一笔。
+        ToolRegistry.Bundle staffBundle = registry.forActor(staff);
+        assertThat(staffBundle.routes()).containsKey("pendingRefundQueue");
+        assertThat(staffBundle.routes())
+                .as("审批工具的声明绝不出现在店员的清单里：看得见不等于批得了，声明本身也不该下发")
+                .doesNotContainKeys("approveRefund", "rejectRefund");
 
-        assertThat(out.text()).contains("FORBIDDEN");
+        ToolRegistry.Execution queue = exec(staffBundle, staff, "pendingRefundQueue", "{}");
+        assertThat(queue.status()).isEqualTo(ToolRegistry.STATUS_OK);
+        assertThat(queue.text())
+                .as("店员应当看得到待审批队列：这是 HTTP hasAnyRole(STAFF,MERCHANT) 的同一口径")
+                .contains(queued.id())
+                .contains(u);
+
+        // ② 批准：即便拿着商家的工具包硬闯，方法内的判据也必须挡回去。
+        ToolRegistry.Execution approve = exec(registry.forActor(actors.resolve(MERCHANT)), staff,
+                "approveRefund", "{\"refundId\":\"" + queued.id() + "\"}");
+        // 先断言审计：文本断言只是形状，审计条数才是「判据真的执行了」的证据。
+        // （反过来若只断言文本：判据被删时也仍然红，但红的是领域层抛错的文本，
+        //   看不出是工具层失守——而那正是要盯的那一层。）
         assertThat(denyCount(STAFF, "TOOL_FORBIDDEN_approveRefund")).isEqualTo(1);
+        assertThat(approve.text()).contains("FORBIDDEN");
+
+        // ③ 驳回：与批准分开断言。两条判据是分别写死的，漏改其中一条不该被另一条掩盖。
+        ToolRegistry.Execution reject = exec(registry.forActor(actors.resolve(MERCHANT)), staff,
+                "rejectRefund", "{\"refundId\":\"" + queued.id() + "\"}");
+        assertThat(denyCount(STAFF, "TOOL_FORBIDDEN_rejectRefund")).isEqualTo(1);
+        assertThat(reject.text()).contains("FORBIDDEN");
+
         assertThat(refundStatus(queued.id())).isEqualTo(RefundView.STATUS_PENDING_APPROVAL);
 
         // 纵深防御：绕过工具层直接调领域服务，也必须被 requireMerchant 挡下，

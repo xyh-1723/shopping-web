@@ -1,7 +1,6 @@
 package dev.learning.mall.assistant.internal;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.learning.mall.assistant.harness.Effectful;
 import dev.learning.mall.assistant.security.AssistantActors;
@@ -10,11 +9,10 @@ import dev.learning.mall.order.api.OrderRefunds;
 import dev.learning.mall.order.api.RefundView;
 import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.agent.tool.ToolMemoryId;
-import java.util.List;
 import org.springframework.stereotype.Component;
 
 /**
- * 商家专属工具（MERCHANT 角色）：退款审批。与 {@link StaffTools} 同一套三道闸门结构。
+ * 商家专属的退款<b>决策</b>工具（MERCHANT 角色）：批准 / 驳回。与 {@link StaffTools} 同一套三道闸门结构。
  *
  * <p><b>为什么工具内部还要再查一次角色</b>：工具清单虽然按角色下发了（第一道，见
  * {@link ToolRegistry#forActor(dev.learning.mall.assistant.security.AssistantActor)}），
@@ -26,12 +24,22 @@ import org.springframework.stereotype.Component;
  *   <li>第三道：越权尝试写入审计表，便于发现有人在探测。</li>
  * </ul>
  *
- * <p><b>判角色用 {@code isMerchant()}，不用 {@code isOperatingSide()}</b>：
- * 商家与店员是<b>并列</b>角色（{@code ROLE_MERCHANT} 刻意不带 {@code ROLE_STAFF}）。
- * 用 {@code isOperatingSide()} 会让商家顺手拿到店员的发货 / 改价 / 改库存工具，
- * 那就是越权——T13a 定的边界不能在这里被抹平。同理，店员也拿不到这里的审批工具：
- * 「审批是商家的活」，让店员能审批等于打开「店员自己申请、自己批准」这条路
- * （{@code SecurityConfig} 里退款审批端点那条 {@code hasRole("MERCHANT")} 也是同一个判断）。
+ * <p><b>这里只放会动钱的动作，判据是 {@code isMerchant()}</b>。
+ * 商家与店员是<b>并列</b>角色（{@code ROLE_MERCHANT} 刻意不带 {@code ROLE_STAFF}）：
+ * <ul>
+ *   <li>判据不能用 {@code isOperatingSide()}——那样店员也能批退款，等于打开
+ *       「店员自己申请退款、自己批准」这条路；</li>
+ *   <li>反过来，商家也不会因为 {@code isMerchant()} 而顺手拿到店员的发货 / 改价 / 改库存，
+ *       那些方法在 {@link StaffTools} 里，由「工具注册给谁」决定。</li>
+ * </ul>
+ * 与 HTTP 层同一口径：{@code SecurityConfig} 里退款审批端点（{@code POST} 的批准 / 驳回）
+ * 是 {@code hasRole("MERCHANT")}，而不是 {@code hasAnyRole("STAFF","MERCHANT")}。
+ *
+ * <p><b>只读的队列不在这里</b>：看队列（{@code pendingRefundQueue}）对<b>整个经营侧</b>开放
+ * （店员 + 商家），与 HTTP 的 {@code GET /api/refunds/pending} 一致，见 {@link RefundQueueTools}。
+ * 分成两个类而不是在一个类里按工具改判据，是为了让 {@link ToolRegistry} 只靠「注册给谁」
+ * 就能表达权限——店员的清单里根本不会出现批准 / 驳回的声明，
+ * 也就不需要一份「按工具名过滤」的第二份规则表（那种表最容易漏改）。
  *
  * <p><b>审批规则只有一份实现</b>：这里不写第二份判定，也不重复「该不该还货、怎么放款」。
  * 退款的领域实现只有 {@link OrderRefunds}（实现在 {@code RefundService}）一份，
@@ -49,14 +57,6 @@ public class MerchantTools {
 
     private static final String DENIED_NOTICE = "当前账号没有商家权限，无法审批退款。";
 
-    /**
-     * 待审批队列的单次返回上限。
-     *
-     * <p>不做成配置：它由「一个商家一次该看多少」这份产品判断决定，
-     * 而到目前为止没有人提出要调它（做成配置 = 一个改了也不起作用的旋钮）。
-     */
-    private static final int QUEUE_LIMIT = 20;
-
     private final OrderRefunds refunds;
     private final AssistantActors actors;
     private final AssistantAudit audit;
@@ -67,26 +67,6 @@ public class MerchantTools {
         this.actors = actors;
         this.audit = audit;
         this.json = json;
-    }
-
-    @Tool("商家专属：列出待商家审批的退款队列（先申请的排在前面），含退款单号、订单号、买家账号、"
-            + "金额与原因。只有商家账号可调用。返回 JSON 数组；队列为空时返回空数组。")
-    public String pendingRefundQueue(@ToolMemoryId String username) {
-        if (denied(username, "pendingRefundQueue")) return denial();
-        List<RefundView> queue = refunds.pendingQueue(QUEUE_LIMIT);
-        ArrayNode array = json.createArrayNode();
-        for (RefundView r : queue) {
-            ObjectNode node = json.createObjectNode();
-            node.put("id", r.id());
-            node.put("orderId", r.orderId());
-            node.put("username", r.username());
-            node.put("amount", r.amount());
-            node.put("reasonCode", r.reasonCode());
-            node.put("reasonText", r.reasonText());
-            node.put("createdAt", String.valueOf(r.createdAt()));
-            array.add(node);
-        }
-        return array.toString();
     }
 
     /**
@@ -120,7 +100,7 @@ public class MerchantTools {
         return node.toString();
     }
 
-    /** 角色硬校验：以登录账号的角色为准，任何时候都不信任对话内容。 */
+    /** 角色硬校验（决策工具）：以登录账号的角色为准，任何时候都不信任对话内容。 */
     private boolean denied(String username, String toolName) {
         if (!actors.resolve(username).isMerchant()) {
             audit.record(username, null, AssistantAudit.STAGE_TOOL, "DENY",

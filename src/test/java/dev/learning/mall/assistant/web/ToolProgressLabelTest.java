@@ -69,13 +69,17 @@ class ToolProgressLabelTest {
         assertThat(userTools).doesNotContain("inventoryAlerts", "salesOverview", "customerOrders");
         assertThat(staffTools).containsAll(userTools).contains("inventoryAlerts");
 
-        // 商家工具同理：只对商家可见，店员与顾客都拿不到（审批是商家的活）。
+        // 退款的两档权限：队列是经营侧<b>只读</b>（店员 + 商家都能看），审批只属于商家。
+        // 与 HTTP 同口径：GET /api/refunds/pending → hasAnyRole("STAFF","MERCHANT")，
+        // POST .../approve|reject → hasRole("MERCHANT")。
         Set<String> merchantTools = new TreeSet<>();
         registry.forActor(new AssistantActor("label-merchant",
                 Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_MERCHANT)))
                 .specs().forEach(s -> merchantTools.add(s.name()));
         assertThat(userTools).doesNotContain("pendingRefundQueue", "approveRefund", "rejectRefund");
-        assertThat(staffTools).doesNotContain("pendingRefundQueue", "approveRefund", "rejectRefund");
+        assertThat(staffTools)
+                .as("店员看得到待审批队列（经营侧只读）").contains("pendingRefundQueue")
+                .as("审批仍然只属于商家：看得见不等于批得了").doesNotContain("approveRefund", "rejectRefund");
         assertThat(merchantTools).contains("pendingRefundQueue", "approveRefund", "rejectRefund");
     }
 }
