@@ -15,6 +15,7 @@ import dev.learning.mall.assistant.internal.AssistantService;
 import dev.learning.mall.assistant.internal.StaffTools;
 import dev.learning.mall.assistant.internal.ToolRegistry;
 import dev.learning.mall.assistant.security.AssistantActor;
+import dev.learning.mall.assistant.security.AssistantActors;
 import dev.learning.mall.assistant.security.AssistantRateLimiter;
 import dev.learning.mall.assistant.security.AssistantSecurityProperties;
 import java.util.List;
@@ -53,6 +54,7 @@ class AssistantSecurityIntegrationTest {
     @Autowired AssistantProperties properties;
     @Autowired AssistantSecurityProperties security;
     @Autowired ToolRegistry registry;
+    @Autowired AssistantActors actors;
     @Autowired StaffTools staffTools;
     @Autowired AssistantRateLimiter rateLimiter;
     @Autowired JdbcClient jdbc;
@@ -138,6 +140,45 @@ class AssistantSecurityIntegrationTest {
 
         String crossUser = staffTools.customerOrders("student", "classmate");
         assertThat(crossUser).contains("FORBIDDEN");
+    }
+
+    /**
+     * 顾客这档的清单必须与他<b>实际拿得到</b>的工具一致：既不能漏（工具能用却不说，
+     * 模型就回答「我没有这个能力」），也不能多（把店员 / 商家的能力列上去）。
+     *
+     * <p>这份清单不是只给模型看的：{@code static/js/assistant.js} 把它渲染在页面的
+     * {@code guard-caps} 上，顾客自己就看得到——所以漏报的误导性比只给模型看时更强。
+     */
+    @Test
+    @DisplayName("能力清单不说漏也不说多：顾客清单与 USER 工具包一致，且不削弱安全边界")
+    void userCapabilitiesMatchWhatTheUserCanReallyDo() {
+        AssistantActor user = actors.resolve("student");
+
+        assertThat(user.roles()).containsExactly(AssistantActor.ROLE_USER);
+        // 清单说真话的前提：这些工具真的在顾客手里（先确认工具，再确认文案）。
+        List<String> tools = registry.forActor(user).specs().stream()
+                .map(ToolSpecification::name).toList();
+        assertThat(tools).contains("createOrder", "cancelOrder", "requestRefund", "myWatches");
+
+        assertThat(service.status("student").capabilities())
+                .as("工具可用却不在清单里写出来 = 漏报能力")
+                .contains("按我的购物袋下单（需我本人页面确认）",
+                        "取消我自己的订单（需我本人页面确认）",
+                        "为我已支付的订单申请退款（需我本人页面确认）",
+                        "查看我关注的商品")
+                .as("反向控制：店员 / 商家专属的一条都不许出现在顾客清单里")
+                .doesNotContain("库存预警与补货建议", "全站经营概览", "按用户名查询订单",
+                        "查看待审批的退款队列（只读，审批归商家）",
+                        "批准退款申请（立即放款给买家）", "驳回退款申请");
+
+        assertThat(user.capabilityHint())
+                .as("补漏报不许削弱安全边界：仍然要写明不能碰别人的数据与内部文档")
+                .contains("不能查询其他用户的数据")
+                .contains("内部文档")
+                .as("同时要如实说出本人范围内真能做的动作")
+                .contains("下单", "取消", "申请退款")
+                .as("这些动作只是发起待确认卡片，不许暗示已经生效")
+                .contains("待确认卡片");
     }
 
     @Test
