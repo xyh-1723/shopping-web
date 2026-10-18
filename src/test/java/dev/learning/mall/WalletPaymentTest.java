@@ -25,6 +25,8 @@ import dev.learning.mall.wallet.internal.WalletService;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -88,6 +90,15 @@ class WalletPaymentTest {
 
     private String user;
 
+    /**
+     * 本类建过的订单号（跨用例累积）：{@link #noOrderTrailIsLeftBehind()} 用它把自查
+     * 的范围收窄到本类自己的行上（为什么要收窄见 {@link OrderTrail#residueFor}）。
+     */
+    private static final List<String> seenOrderIds = new CopyOnWriteArrayList<>();
+
+    /** {@code @AfterAll} 必须是 static，拿不到实例的 {@code jdbc}；由 {@code @BeforeEach} 递进来。 */
+    private static JdbcClient trailJdbc;
+
     @BeforeEach
     void resetData() {
         // 与 MallIntegrationTest / CheckoutAmountConsistencyTest 同一份约定：
@@ -97,6 +108,7 @@ class WalletPaymentTest {
             jdbc.sql("DELETE FROM " + table).update();
         }
         jdbc.sql("UPDATE product SET stock = 30").update();
+        trailJdbc = jdbc;
     }
 
     @AfterEach
@@ -109,6 +121,30 @@ class WalletPaymentTest {
             }
             user = null;
         }
+        // 订单及其附属行：@BeforeEach 里那串全表清只护得住「本类开始时是干净的」，
+        // 护不住「本类跑完之后没给下一个类留东西」——最后一条用例的订单 + 事件会留到别的类里去。
+        // 删除顺序按外键来（notification → outbox_event → order_item → mall_order），见 OrderTrail#purge。
+        OrderTrail.purge(jdbc, seenOrderIds);
+    }
+
+    /**
+     * 哨兵：本类跑完之后，自己建过的订单在订单表 / 明细表 / 事件表里一行都不剩。
+     *
+     * <p>它存在的<b>唯一</b>理由是「清理这件事本身无法被变异验证」：把上面那行
+     * {@code OrderTrail.purge} 删掉，全量测试仍然全绿——没有任何用例按全表计数断言
+     * 这三张表，清理就这么静悄悄地失效了。有了这条断言，删掉清理就会变红。
+     *
+     * <p>范围按本类自己建过的订单号收窄，因此与其他测试类的执行顺序无关。
+     */
+    @AfterAll
+    static void noOrderTrailIsLeftBehind() {
+        if (trailJdbc == null) {
+            return;
+        }
+        assertThat(OrderTrail.residueFor(trailJdbc, seenOrderIds))
+                .as("本类建过的订单在 mall_order / order_item / outbox_event 里必须一行不剩："
+                        + "outbox_event.aggregate_id 有外键指向订单，残迹会一路带到下一个测试类")
+                .isZero();
     }
 
     // ——————————————————— 支付：真的扣款 ———————————————————
@@ -430,8 +466,10 @@ class WalletPaymentTest {
     /** 造一笔真实待支付订单（商品1 ×1，应付 ¥47.00）。 */
     private OrderView newPendingOrder(String username) {
         String key = "wp-" + UUID.randomUUID().toString().replace("-", "");
-        return facade.create(username, key,
+        OrderView order = facade.create(username, key,
                 new CreateOrderRequest(List.of(new CreateOrderRequest.Line(1, 1))));
+        seenOrderIds.add(order.id());
+        return order;
     }
 
     /**
