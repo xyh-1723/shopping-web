@@ -254,6 +254,13 @@ public class AssistantService {
         if (actor.isStaff()) {
             base.addAll(List.of("库存预警与补货建议", "全站经营概览", "按用户名查询订单", "检索内部运营文档"));
         }
+        if (actor.isMerchant()) {
+            // 商家是「经营决策方」而不是店员。本次只写它此刻真的做得到的事——
+            // 知识库检索会命中内部运营文档（见 KnowledgeService 的 isOperatingSide 判定）。
+            // 退款审批相关的能力等 MerchantTools 与 refund 表落地（T13b / T14）后再补：
+            // 现在列上去、工具却不存在，就是让模型对买家许空诺。
+            base.add("检索内部运营文档（供应商与经营口径）");
+        }
         return List.copyOf(base);
     }
 
