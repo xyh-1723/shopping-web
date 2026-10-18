@@ -11,6 +11,8 @@ import dev.learning.mall.messaging.internal.NotificationSink;
 import dev.learning.mall.messaging.internal.OutboxRepository;
 import dev.learning.mall.messaging.internal.SmsGateway;
 import java.time.LocalDateTime;
+import java.util.List;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -51,10 +53,14 @@ class NotificationSmsChannelTest {
     @Autowired PlatformTransactionManager txManager;
     @MockitoSpyBean SmsGateway gateway;
 
+    /** {@code @AfterAll} 必须是 static，拿不到实例的 {@code jdbc}；由 {@code @BeforeEach} 递进来。 */
+    private static JdbcClient trailJdbc;
+
     @BeforeEach
     void setUp() {
         // spy 在同一上下文里跨用例复用；不 reset 的话上一条用例的调用会被数进去。
         reset(gateway);
+        trailJdbc = jdbc;
         // 夹具订单：只为满足 outbox_event.aggregate_id → mall_order.id 的外键。
         jdbc.sql("INSERT INTO mall_order(id,username,idempotency_key,request_hash,total,status) "
                         + "VALUES(:id,'t15-fixture','t15-sms-key','t15-fixture-hash',1.00,'PENDING')")
@@ -67,6 +73,29 @@ class NotificationSmsChannelTest {
         jdbc.sql("DELETE FROM notification WHERE username = :u").param("u", USER).update();
         jdbc.sql("DELETE FROM outbox_event WHERE aggregate_id = :o").param("o", ORDER).update();
         jdbc.sql("DELETE FROM mall_order WHERE id = :o").param("o", ORDER).update();
+    }
+
+    /**
+     * 哨兵：本类跑完之后，自己那条夹具订单在留痕表里一行都不剩。
+     *
+     * <p>为什么需要它（实测结论）：把上面 {@code cleanUp} 里的留痕清理删掉，
+     * 本类的 2 条用例<b>仍然全绿</b>——{@code rolledBackAuditTrailCannotHideTheOutboundCall}
+     * 断言的 {@code deliveryCount() == 0} 只在「它排在 {@code smsIsUsedWhenKeysArePresent}
+     * 之后」时才红，而 JUnit 的方法顺序恰好让它排在前面，于是清理处于<b>零覆盖</b>状态：
+     * 存在，但没有任何一条断言会因为它消失而改变颜色。
+     *
+     * <p>范围按本类自己的夹具订单号收窄，所以与执行顺序无关
+     * （理由见 {@link DeliveryTrail#residueFor}）。
+     */
+    @AfterAll
+    static void noDeliveryTrailIsLeftBehind() {
+        if (trailJdbc == null) {
+            return;
+        }
+        assertThat(DeliveryTrail.residueFor(trailJdbc, List.of(ORDER)))
+                .as("本类的夹具订单在 notification_delivery 里必须一行不剩："
+                        + "留痕表的 order_id 没有外键，残迹会带到下一个测试类")
+                .isZero();
     }
 
     @Test
