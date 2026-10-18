@@ -62,6 +62,8 @@ public class ToolRegistry {
     private final ProactiveTools proactiveTools;
     private final MemoryTools memoryTools;
     private final StaffTools staffTools;
+    private final RefundQueueTools refundQueueTools;
+    private final MerchantTools merchantTools;
     private final KnowledgeTools knowledgeTools;
     private final PaymentTools paymentTools;
     private final OrderTools orderTools;
@@ -71,6 +73,7 @@ public class ToolRegistry {
     public ToolRegistry(CatalogTools catalogTools, CustomerTools customerTools, GuideTools guideTools,
                         CartTools cartTools, WatchTools watchTools, ProactiveTools proactiveTools,
                         MemoryTools memoryTools, StaffTools staffTools,
+                        RefundQueueTools refundQueueTools, MerchantTools merchantTools,
                         KnowledgeTools knowledgeTools, PaymentTools paymentTools, OrderTools orderTools,
                         AssistantAudit audit, ObjectMapper json) {
         this.catalogTools = catalogTools;
@@ -81,6 +84,8 @@ public class ToolRegistry {
         this.proactiveTools = proactiveTools;
         this.memoryTools = memoryTools;
         this.staffTools = staffTools;
+        this.refundQueueTools = refundQueueTools;
+        this.merchantTools = merchantTools;
         this.knowledgeTools = knowledgeTools;
         this.paymentTools = paymentTools;
         this.orderTools = orderTools;
@@ -100,7 +105,15 @@ public class ToolRegistry {
         targets.add(knowledgeTools); // 知识库检索：所有登录用户；数据范围由工具内部按角色过滤（多租户 RAG）
         targets.add(paymentTools);   // 资金写操作：只「发起」待确认支付，真正执行由用户本人确认（human-in-the-loop）
         targets.add(orderTools);     // 订单写操作：只「发起」下单/取消确认，落单与取消同样由用户本人确认
-        if (actor.isStaff()) targets.add(staffTools); // 店员才看得见店员工具
+        if (actor.isStaff()) targets.add(staffTools);       // 店员才看得见店员工具
+        // 退款队列是经营侧<b>只读</b>：店员与商家都看得见。与 HTTP 的
+        // GET /api/refunds/pending → hasAnyRole("STAFF","MERCHANT") 同一口径；
+        // 收成 isMerchant() 会让「谁能看队列」在 HTTP 与对话里长出两套答案。
+        if (actor.isOperatingSide()) targets.add(refundQueueTools);
+        // 审批只有商家：判 isMerchant()，不是 isOperatingSide()——
+        // 用后者等于允许「店员自己申请退款、自己批准」。
+        // 队列与审批分成两个类注册，就是为了这里不需要一份「按工具名过滤」的第二份规则表。
+        if (actor.isMerchant()) targets.add(merchantTools);
         Map<String, Object> routes = new LinkedHashMap<>();
         List<ToolSpecification> specs = new ArrayList<>();
         Set<String> effectful = new LinkedHashSet<>();

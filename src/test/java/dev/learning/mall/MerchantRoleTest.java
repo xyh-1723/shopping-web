@@ -186,11 +186,49 @@ class MerchantRoleTest {
         assertThat(status.role()).isEqualTo("MERCHANT");
         assertThat(status.capabilities())
                 .contains("检索内部运营文档（供应商与经营口径）")
+                .as("T13b 后商家真的有退款审批工具，能力清单就得如实列出来")
+                .contains("查询待审批的退款队列", "批准退款申请（立即放款给买家）", "驳回退款申请")
                 .as("商家拿不到 staffTools，把店员能力列上去就是空承诺")
                 .doesNotContain("库存预警与补货建议", "全站经营概览", "按用户名查询订单");
         assertThat(actors.resolve("merchant").capabilityHint())
                 .contains("商家")
-                .contains("退款审批功能尚未开放");
+                .contains("待审批")
+                .as("T13b 后退款审批已真的开放：再写「尚未开放」就是一句与事实相反的陈述，"
+                        + "会让模型对买家说错话（空承诺与谎报能力是同一个毛病的两面）")
+                .doesNotContain("尚未开放");
+    }
+
+    // ——————————————————— 附加：店员的清单也要说实话 ———————————————————
+
+    /**
+     * 队列工具对店员<b>可用</b>（{@code RefundQueueTools} 判 {@code isOperatingSide()}），
+     * 于是店员的能力清单与系统提示<b>都必须写出来</b>，且必须点明只读。
+     *
+     * <p>两处一起断言的理由与商家那条相同：只改一处会自相矛盾——
+     * 清单说能做、提示说不能做（或反过来），模型收到的是两个互相打架的指令。
+     */
+    @Test
+    @DisplayName("附加：店员能力清单写明「能看队列但不能批」——工具可用却不说，等于漏报能力")
+    void staffCapabilitiesMentionTheReadOnlyQueue() {
+        AssistantActor staff = actors.resolve("admin");
+
+        assertThat(staff.isStaff()).isTrue();
+        assertThat(staff.isMerchant()).as("前提：admin 不带 ROLE_MERCHANT（并列角色）").isFalse();
+        // 能力清单说的必须是真话，所以先确认工具真的在店员手里。
+        assertThat(registry.forActor(staff).routes()).containsKey("pendingRefundQueue");
+
+        assertThat(service.status("admin").capabilities())
+                .as("队列工具对店员可用，清单里就必须写出来：否则模型会回答「我没有这个能力」，"
+                        + "用户永远走不到那个工具。漏报能力与谎报能力是同一个问题的两面")
+                .contains("查看待审批的退款队列（只读，审批归商家）");
+        assertThat(staff.capabilityHint())
+                .contains("待审批")
+                .as("措辞必须点明只读：批准 / 驳回是商家专属")
+                .contains("只读")
+                .doesNotContain("可以批准", "可以驳回");
+        // 反向控制：清单里不许出现审批动作——看得见不等于批得了。
+        assertThat(service.status("admin").capabilities())
+                .doesNotContain("批准退款申请（立即放款给买家）", "驳回退款申请");
     }
 
     /** RAG 阶段针对某个 username 的 DENY 条数：用来发现「命中又被过滤」这类自相矛盾的改动。 */

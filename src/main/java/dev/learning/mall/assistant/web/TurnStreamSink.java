@@ -57,7 +57,10 @@ final class TurnStreamSink implements TurnListener {
             Map.entry("unwatchProduct", "正在取消关注"),
             Map.entry("myWatches", "正在查看你关注的好物"),
             Map.entry("myAlerts", "正在查看你的提醒"),
-            Map.entry("recommendRelated", "正在挑选相关好物"));
+            Map.entry("recommendRelated", "正在挑选相关好物"),
+            Map.entry("pendingRefundQueue", "正在查看待审批退款"),
+            Map.entry("approveRefund", "正在批准退款并放款"),
+            Map.entry("rejectRefund", "正在驳回退款"));
 
     private final SseEmitter emitter;
     private final AtomicBoolean closed = new AtomicBoolean();

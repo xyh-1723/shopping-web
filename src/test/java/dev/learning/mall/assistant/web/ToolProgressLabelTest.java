@@ -37,9 +37,13 @@ class ToolProgressLabelTest {
     @DisplayName("每个对用户可见的工具都有中文进度文案，不会退化成一串裸工具名")
     void everyUserVisibleToolHasAChineseLabel() {
         List<String> missing = new ArrayList<>();
+        // MERCHANT 必须也在里面：它有自己的专属工具（退款审批），
+        // 只遍历 USER / STAFF 会让那几个工具漏掉中文文案而无人发现。
         for (AssistantActor actor : List.of(
                 new AssistantActor("label-user", Set.of(AssistantActor.ROLE_USER)),
-                new AssistantActor("label-staff", Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_STAFF)))) {
+                new AssistantActor("label-staff", Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_STAFF)),
+                new AssistantActor("label-merchant",
+                        Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_MERCHANT)))) {
             for (ToolSpecification spec : registry.forActor(actor).specs()) {
                 if (!TurnStreamSink.hasLabel(spec.name())) {
                     missing.add(spec.name());
@@ -64,5 +68,18 @@ class ToolProgressLabelTest {
 
         assertThat(userTools).doesNotContain("inventoryAlerts", "salesOverview", "customerOrders");
         assertThat(staffTools).containsAll(userTools).contains("inventoryAlerts");
+
+        // 退款的两档权限：队列是经营侧<b>只读</b>（店员 + 商家都能看），审批只属于商家。
+        // 与 HTTP 同口径：GET /api/refunds/pending → hasAnyRole("STAFF","MERCHANT")，
+        // POST .../approve|reject → hasRole("MERCHANT")。
+        Set<String> merchantTools = new TreeSet<>();
+        registry.forActor(new AssistantActor("label-merchant",
+                Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_MERCHANT)))
+                .specs().forEach(s -> merchantTools.add(s.name()));
+        assertThat(userTools).doesNotContain("pendingRefundQueue", "approveRefund", "rejectRefund");
+        assertThat(staffTools)
+                .as("店员看得到待审批队列（经营侧只读）").contains("pendingRefundQueue")
+                .as("审批仍然只属于商家：看得见不等于批得了").doesNotContain("approveRefund", "rejectRefund");
+        assertThat(merchantTools).contains("pendingRefundQueue", "approveRefund", "rejectRefund");
     }
 }
