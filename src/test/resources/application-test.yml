@@ -18,6 +18,13 @@ mall:
     auto-receive-enabled: false
     auto-receive-scan-delay-ms: 3600000
     auto-receive-initial-delay-ms: 3600000
+  # 钱包：测试里用与生产同一组额度，但显式写出来——
+  # 额度是「开户授予多少」的真相来源，测试不该悄悄继承默认值而不自知。
+  wallet:
+    initial-grant-cents: 50000
+    topup-enabled: true
+    topup-amount-cents: 10000
+    topup-ceiling-cents: 100000
   assistant:
     memory:
       # 测试里默认关掉「轮后自动抽取偏好」：它会在线程池上异步再跑一次模型/写库，

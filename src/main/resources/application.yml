@@ -114,6 +114,14 @@ mall:
     queue-capacity: 32
     max-attempts: 5
     retry-delay-seconds: 2
+  # 内置钱包：站内虚拟余额（不连银行、不做清算、不出对账文件）。
+  # 初始额度刻意不写进迁移脚本——迁移读不到 application.yml，在 SQL 里写死金额
+  # 就是第二个真相来源（改了配置，已开户的用户还是旧额度）。走这里 + 懒开户。
+  wallet:
+    initial-grant-cents: 50000        # 演示初始额度 ¥500，首次触达钱包时授予
+    topup-enabled: true               # 演示充值总开关；关掉它用于演示「没钱了」
+    topup-amount-cents: 10000         # 固定档位 ¥100，不可自定义金额
+    topup-ceiling-cents: 100000       # 累计授予上限 ¥1000：让「余额不足」成为可达且永久的状态
   # 订单：支付时限 + 超时自动关闭。
   # 关闭动作与「用户主动取消」是同一份实现，只是关闭原因不同（USER / TIMEOUT）。
   order:
