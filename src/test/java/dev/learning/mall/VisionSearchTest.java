@@ -115,8 +115,11 @@ class VisionSearchTest {
     void rejectsHtmlPayload() {
         byte[] html = "<html><body>not an image</body></html>"
                 .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        // 与上面 SVG 那条是同一个拒绝原因：文件头不是任何已知位图格式。
+        // 只断言类型的话，「体积超限 / 张数超限」也能让它绿。
         assertThatThrownBy(() -> imageGuard.inspect(List.of(payload("image/png", html))))
-                .isInstanceOf(BusinessException.class);
+                .isInstanceOf(BusinessException.class)
+                .hasFieldOrPropertyWithValue("code", "IMAGE_CONTENT_MISMATCH");
     }
 
     @Test

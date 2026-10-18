@@ -109,11 +109,20 @@ class AssistantIntegrationTest {
         ConversationView studentConv = service.create("student", null);
         // classmate 看不到 student 的会话。
         assertThat(service.list("classmate")).isEmpty();
-        assertThatThrownBy(() -> service.get(studentConv.id(), "classmate"))
-                .isInstanceOf(BusinessException.class);
-        assertThatThrownBy(() -> service.send(studentConv.id(), "classmate", "你好"))
-                .isInstanceOf(BusinessException.class);
-        assertThatThrownBy(() -> service.delete(studentConv.id(), "classmate"))
-                .isInstanceOf(BusinessException.class);
+        // 只断言 isInstanceOf(BusinessException.class) 太宽：越权访问若因为「限流」、
+        // 「空消息」等别的原因被拒，宽断言照样绿，看不出这里其实没做归属校验。
+        // 三个入口都必须把别人的会话当成「不存在」——这正是要守的行为。
+        assertThat(catchThrowableOfType(() -> service.get(studentConv.id(), "classmate"),
+                BusinessException.class).code())
+                .as("读别人的会话：必须表现为 NOT_FOUND")
+                .isEqualTo("NOT_FOUND");
+        assertThat(catchThrowableOfType(() -> service.send(studentConv.id(), "classmate", "你好"),
+                BusinessException.class).code())
+                .as("往别人的会话发消息：必须表现为 NOT_FOUND")
+                .isEqualTo("NOT_FOUND");
+        assertThat(catchThrowableOfType(() -> service.delete(studentConv.id(), "classmate"),
+                BusinessException.class).code())
+                .as("删别人的会话：必须表现为 NOT_FOUND")
+                .isEqualTo("NOT_FOUND");
     }
 }

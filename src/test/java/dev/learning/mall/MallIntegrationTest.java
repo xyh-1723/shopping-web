@@ -120,8 +120,14 @@ class MallIntegrationTest {
     @Test void replayReturnsOriginalButChangedPayloadConflicts() {
         var original = facade.create("student", "same-request-key", request(1));
         assertThat(facade.create("student", "same-request-key", request(1)).id()).isEqualTo(original.id());
-        assertThatThrownBy(() -> facade.create("student", "same-request-key", request(2)))
-                .isInstanceOf(BusinessException.class).hasMessageContaining("不同");
+        // 只断言 isInstanceOf(BusinessException.class) 太宽：INVALID_ITEMS、OUT_OF_STOCK 都能让它绿。
+        // 这条用例要守的是「同一编号换了内容」这一种拒绝原因，所以断言到 code()。
+        BusinessException conflict = catchThrowableOfType(
+                () -> facade.create("student", "same-request-key", request(2)), BusinessException.class);
+        assertThat(conflict.code())
+                .as("同一请求编号换了购物车内容：必须是 IDEMPOTENCY_CONFLICT，而不是「因为别的原因失败了」")
+                .isEqualTo("IDEMPOTENCY_CONFLICT");
+        assertThat(conflict).hasMessageContaining("不同");
         // key 的唯一范围包含用户：另一个账号可以使用相同 key。
         assertThat(facade.create("classmate", "same-request-key", request(1)).id()).isNotEqualTo(original.id());
         assertThat(products.get(1).stock()).isEqualTo(8);
@@ -131,13 +137,23 @@ class MallIntegrationTest {
         var first = facade.create("student","sorted-request",new CreateOrderRequest(List.of(a,b)));
         var second = facade.create("student","sorted-request",new CreateOrderRequest(List.of(b,a)));
         assertThat(second.id()).isEqualTo(first.id());
-        assertThatThrownBy(() -> facade.create("student","duplicate-items",new CreateOrderRequest(List.of(a,a))))
-                .isInstanceOf(BusinessException.class);
+        // 同上：库存不足、金额校验失败一样会抛 BusinessException 并让宽断言变绿。
+        // 断言到 code() 才能确定拒绝原因就是「同一种商品写了两行」，而不是别的。
+        assertThat(catchThrowableOfType(() -> facade.create("student","duplicate-items",
+                new CreateOrderRequest(List.of(a,a))), BusinessException.class).code())
+                .as("同一商品拆成两行提交：必须是 DUPLICATE_PRODUCT")
+                .isEqualTo("DUPLICATE_PRODUCT");
     }
     @Test void insufficientSecondProductRollsBackEarlierDeductionAndOrder() {
         jdbc.sql("UPDATE product SET stock=0 WHERE id=2").update();
         var request = new CreateOrderRequest(List.of(new CreateOrderRequest.Line(1,2), new CreateOrderRequest.Line(2,1)));
-        assertThatThrownBy(() -> facade.create("student", "rollback-request", request)).isInstanceOf(BusinessException.class);
+        // 同上：这条用例真正守的是回滚，但「为什么失败」也必须固定——
+        // 失败原因只能是第二件商品库存为 0。若这里换成别的 code，
+        // 说明触发回滚的是另一条校验，那下面「库存回到 10、一张订单都没留下」证明的就不是这件事了。
+        assertThat(catchThrowableOfType(() -> facade.create("student", "rollback-request", request),
+                BusinessException.class).code())
+                .as("第二件商品库存为 0：必须是 OUT_OF_STOCK")
+                .isEqualTo("OUT_OF_STOCK");
         assertThat(products.get(1).stock()).isEqualTo(10);
         assertThat(count("mall_order")).isZero(); assertThat(count("order_item")).isZero(); assertThat(count("outbox_event")).isZero();
     }
