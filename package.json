@@ -7,7 +7,8 @@
     "test:voice:browser": "node tests/voice-smoke.cjs",
     "test:security": "node tests/security-eval.cjs",
     "test:redteam": "node tests/redteam-mutate.cjs",
-    "test:async": "node tests/async-smoke.cjs"
+    "test:async": "node tests/async-smoke.cjs",
+    "test:wallet-ui": "node tests/wallet-ui-smoke.cjs"
   },
   "devDependencies": {
     "@playwright/test": "1.58.2"

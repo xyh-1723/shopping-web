@@ -702,6 +702,47 @@ footer .brand-mark {
   color: #6a805a;
   margin: 24px 0;
 }
+/* 钱包条：余额与最近流水。视觉上是「一条」，因为它回答的是同一个问题——钱在哪儿。 */
+.wallet-strip {
+  border: 1px solid #dfe7cf;
+  background: #fbfdf6;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin: 0 0 20px;
+  font-size: 12px;
+  color: #6a805a;
+}
+.wallet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+.wallet-head .subtle {
+  display: block;
+}
+.wallet-head strong {
+  font-size: 22px;
+  color: #2f3d24;
+}
+.wallet-ledger {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.wallet-ledger li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.wallet-out {
+  color: #b4552f;
+}
+.wallet-in {
+  color: #4f7a34;
+}
 .order-list {
   display: grid;
   gap: 20px;
