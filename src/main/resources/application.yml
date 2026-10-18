@@ -114,6 +114,14 @@ mall:
     queue-capacity: 32
     max-attempts: 5
     retry-delay-seconds: 2
+    # 外发通道（T15）：默认走站内信 IN_APP——本地实现，不需要任何密钥。
+    # SMS 的密钥位现在就在、值为空：空 = 该通道不可用 = 自动降级到 IN_APP 并留一条降级痕，
+    # 绝不会因为缺密钥让通知功能整体死掉（视觉模型那次的教训）。
+    default-channel: IN_APP
+    sms:
+      enabled: true            # 通道总开关；是否真可用还要看下面两个密钥位
+      api-key: ${SMS_API_KEY:} # 预留位：填入真实服务商的 key，SMS 才真正可用
+      secret: ${SMS_SECRET:}   # 预留位：部分厂商是 key + secret 双签，只填一半按未配置处理
   # 内置钱包：站内虚拟余额（不连银行、不做清算、不出对账文件）。
   # 初始额度刻意不写进迁移脚本——迁移读不到 application.yml，在 SQL 里写死金额
   # 就是第二个真相来源（改了配置，已开户的用户还是旧额度）。走这里 + 懒开户。

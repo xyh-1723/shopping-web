@@ -12,7 +12,8 @@ import static org.mockito.Mockito.*;
 
 class DispatcherBackpressureTest {
     @Test void saturatedExecutorLeavesEventAvailableForNextDispatch() throws Exception {
-        var properties = new MessagingProperties(true,1,1,1,5,2,false);
+        // 通道相关两项按生产默认填：默认通道 IN_APP + 密钥留空（= 短信不可用，降级到站内信）。
+        var properties = new MessagingProperties(true,1,1,1,5,2,false,"IN_APP",new MessagingProperties.Sms(true,"",""));
         ThreadPoolTaskExecutor executor = new ExecutorConfig().messageExecutor(properties);
         executor.initialize();
         var repository = mock(OutboxRepository.class); var worker = mock(MessageWorker.class);
