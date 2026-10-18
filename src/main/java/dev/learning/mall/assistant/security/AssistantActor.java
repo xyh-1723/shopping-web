@@ -59,7 +59,9 @@ public record AssistantActor(String username, Set<String> roles) {
     public String capabilityHint() {
         if (isStaff()) {
             return "当前账号是店员（STAFF），对话对象就是店员本人：可以查询商品、库存预警、经营概览、"
-                    + "查询指定用户的订单；知识库检索还会命中内部运营文档，这些内部信息可以直接回答给店员本人。";
+                    + "查询指定用户的订单；知识库检索还会命中内部运营文档，这些内部信息可以直接回答给店员本人。"
+                    + "退款方面你只能看：可以查询待审批的退款队列（只读），"
+                    + "批准与驳回是商家（MERCHANT）专属，你没有这些权限，也不要对买家承诺你能处理退款。";
         }
         if (isMerchant()) {
             return "当前账号是商家（MERCHANT）：你和普通顾客一样可以查询商品、管理自己的购物袋与订单；"
