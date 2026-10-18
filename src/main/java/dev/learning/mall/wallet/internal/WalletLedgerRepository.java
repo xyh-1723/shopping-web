@@ -1,17 +1,24 @@
 package dev.learning.mall.wallet.internal;
 
+import dev.learning.mall.wallet.api.WalletLedgerEntry;
 import dev.learning.mall.wallet.api.WalletReason;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.LocalDateTime;
+import java.util.List;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 /**
- * 资金流水（{@code wallet_ledger}）的唯一写入口。
+ * 资金流水（{@code wallet_ledger}）的<b>唯一写入口</b>，以及页面流水视图的唯一读口。
  *
  * <p>包可见，理由与 {@code catalog.internal.StockLedgerRepository} 完全一致：
  * 流水与余额的写入必须成对发生，而这对操作只有 {@link WalletService} 知道怎么排。
  *
  * <p>这里<b>故意不提供 update / delete</b>：流水是审计留痕，错了就补一条反向记录，
- * 不允许改写历史。
+ * 不允许改写历史。{@link #recent} 是唯一的读方法，且它只读——
+ * 连同写入口收在一处，是为了让「页面想看流水就自己拼一条 SQL」这条后门不存在。
  *
  * <p>对账与断链查询刻意<b>不放</b>在这里：它们目前只有测试在用，
  * 放进生产代码就是「没有消费者的端口」（项目硬约定）。它们以 SQL 的形态
@@ -55,6 +62,39 @@ class WalletLedgerRepository {
                 .param("orderId", orderId)
                 .update();
     }
+
+    /**
+     * 最近 {@code limit} 条流水，新的在前。
+     *
+     * <p>显式 {@link RowMapper} 而不是 {@code query(WalletLedgerEntry.class)}：
+     * {@code deltaYuan} 不在表上，只能由 {@link WalletLedgerEntry#of} 现算，
+     * 让框架按列名直接装配 record 会把它填成 {@code null}。
+     *
+     * <p>{@code ORDER BY id DESC} 而不是按 {@code created_at}：{@code created_at} 的默认值
+     * 精度到秒，同一秒内的两笔分不出先后，而 {@code id} 是自增的——
+     * 「顺序错一格」在这里看不出来，在首尾相接那条对账里就是一次断链。
+     */
+    List<WalletLedgerEntry> recent(String username, int limit) {
+        return jdbc.sql("SELECT id, username, delta_cents, balance_before_cents,"
+                        + " balance_after_cents, reason, actor, order_id, created_at"
+                        + " FROM wallet_ledger WHERE username = :user ORDER BY id DESC LIMIT :limit")
+                .param("user", username)
+                .param("limit", limit)
+                .query(ENTRY_MAPPER)
+                .list();
+    }
+
+    private static final RowMapper<WalletLedgerEntry> ENTRY_MAPPER = (rs, rowNum) ->
+            WalletLedgerEntry.of(
+                    rs.getLong("id"),
+                    rs.getString("username"),
+                    rs.getLong("delta_cents"),
+                    rs.getLong("balance_before_cents"),
+                    rs.getLong("balance_after_cents"),
+                    WalletReason.valueOf(rs.getString("reason")),
+                    rs.getString("actor"),
+                    rs.getString("order_id"),
+                    rs.getObject("created_at", LocalDateTime.class));
 
     /**
      * 累计已授予额度（开户 + 演示充值）。一次 SUM 就够了，不需要额外的列去维护。

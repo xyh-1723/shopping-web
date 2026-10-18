@@ -4,7 +4,9 @@ import dev.learning.mall.common.BusinessException;
 import dev.learning.mall.pricing.api.MoneyUnits;
 import dev.learning.mall.wallet.api.WalletAccounts;
 import dev.learning.mall.wallet.api.WalletBalance;
+import dev.learning.mall.wallet.api.WalletLedgerEntry;
 import dev.learning.mall.wallet.api.WalletReason;
+import java.util.List;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -110,6 +112,22 @@ public class WalletService implements WalletAccounts {
         accounts.add(username, amount);
         ledger.append(username, amount, before, before + amount,
                 WalletReason.TOPUP, actor(username), null);
+    }
+
+    /**
+     * 最近若干条流水：一次只读查询，<b>不做懒开户</b>。
+     *
+     * <p>为什么不开户：开户会写一条 {@code OPENING} 流水，于是「用户只是想看一眼」
+     * 这件没有副作用的事会凭空产生一条流水。开户由 {@link #balanceOf} 负责——
+     * 而页面查钱包时两个方法一起调，账户那时已经存在。
+     *
+     * <p>{@code readOnly = true}：它不写任何东西，明确告诉数据库与读者这一点，
+     * 比留给「将来也许有人在这里加一句 append」要好。
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public List<WalletLedgerEntry> recentLedger(String username, int limit) {
+        return ledger.recent(username, limit);
     }
 
     /**

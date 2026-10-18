@@ -1,0 +1,14 @@
+
+================ 反向验证结果 ================
+M1   RED ✅（命中 anonymousCannotReadOrTopUpWallet）     把 /api/wallet/** 放行 → 未登录必须不再是 401（要么 200 要么 500，总之不是 401）
+M2   RED ✅（命中 loggedInUserSeesBalanceAndOpeningEntry） 返回别人的钱包（无视 Principal）→ 余额结构断言必须红
+M3   RED ✅（命中 topUpRaisesBalanceAndHeadsTheLedger）  充值端点不真的调 topUp → 「余额真的增加」必须红
+M4   RED ✅（命中 ledgerIsCapped）                       条数上限 20 → 5 → 「一次最多 20 条」必须红
+M5   RED ✅（命中 topUpBeyondCeilingIsRejected）         去掉累计上限判定 → 「超上限 409」必须红
+M6   RED ✅（命中 topUpDisabledIsRejected）              去掉总开关判定 → 「关闭时 409」必须红
+M7   RED ✅（命中 topUpRaisesBalanceAndHeadsTheLedger,ledgerIsCapped） 流水改成旧的在前 → 「最新一条是这次充值」与「截的是最新 20 条」必须红
+M8   RED ✅（命中 concurrentPaymentsHaveOneReceiptAndOnePaidEvent） 换支付方式支付的错误码改掉 → MallIntegrationTest 第 178 行的收紧断言必须红
+M9   RED ✅（命中 concurrentPaymentsHaveOneReceiptAndOnePaidEvent） 已支付订单取消的错误码改掉 → 第 184/185 行的 INVALID_STATE 断言必须红
+M10  RED ✅（命中 concurrentPaymentsHaveOneReceiptAndOnePaidEvent） 把断言里的期望码改错（自证：这条断言真的被执行到，不是一条走不到的绿）
+=============================================
+done exit=0

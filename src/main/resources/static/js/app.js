@@ -357,6 +357,63 @@ function tickCountdowns() {
       });
   }
 }
+// ————— 钱包：让「钱从哪儿出去的」看得见 —————
+// 后端默认支付方式已经是钱包（扣的是真余额），页面上却只有一个下拉框、
+// 看不见余额，等于让用户蒙着眼睛选。余额与流水一律读服务端，前端不做任何加减。
+const WALLET_REASONS = {
+  OPENING: "开户赠送",
+  TOPUP: "演示充值",
+  PAYMENT: "下单支付",
+  REFUND: "退款到账",
+};
+async function loadWallet() {
+  if (!user) return;
+  try {
+    renderWallet(await api("/api/wallet"));
+  } catch {
+    // 钱包看不到不该拖垮整个页面：订单与货架仍然要能用。
+    const box = $("#wallet");
+    if (box) box.innerHTML = '<div class="wallet-head"><span class="subtle">钱包暂时不可用</span></div>';
+  }
+}
+function renderWallet(view) {
+  const box = $("#wallet");
+  if (!box || !view?.balance) return;
+  // 首屏这一格是 hidden 的（避免先闪一个空框），拿到数据后必须自己摘掉它。
+  // 少了这一句，.hidden 是 display:none !important，钱包在数据到位之后依然不可见——
+  // 「余额查到了但用户看不见」和「接口根本没通」在页面上长得一模一样。
+  box.classList.remove("hidden");
+  const recent = (view.recent || []).slice(0, 5);
+  const rows = recent
+    .map((entry) => {
+      const out = Number(entry.deltaCents) < 0;
+      return `<li><span>${esc(WALLET_REASONS[entry.reason] || entry.reason)}${
+        entry.orderId ? ` · 订单 ${esc(String(entry.orderId).slice(0, 8))}` : ""
+      }</span><span class="${out ? "wallet-out" : "wallet-in"}">${
+        out ? "−" : "+"
+      }${money(Math.abs(Number(entry.deltaYuan)))}</span></li>`;
+    })
+    .join("");
+  box.innerHTML = `<div class="wallet-head"><div><span class="subtle">我的钱包余额</span><strong>${money(
+    Number(view.balance.balanceYuan ?? 0),
+  )}</strong></div><button class="button outline small" data-wallet-action="topup">充值 ¥100</button></div>${
+    rows
+      ? `<ul class="wallet-ledger">${rows}</ul>`
+      : '<p class="subtle">还没有资金变动记录。</p>'
+  }<p class="subtle">演示充值固定 ¥100，累计上限 ¥1000；用钱包支付的订单，钱会从这里真的扣掉。</p>`;
+}
+async function topUpWallet(button) {
+  button.disabled = true;
+  try {
+    const view = await api("/api/wallet/top-up", { method: "POST" });
+    renderWallet(view);
+    toast("充值成功，余额已更新");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
 async function loadOrders() {
   const orders = await api("/api/orders");
   $("#orders").innerHTML =
@@ -367,9 +424,14 @@ async function loadOrders() {
         const actions = pending
           ? expired
             ? '<span class="subtle">支付已超时，系统正在关闭订单并归还库存</span>'
-            : `<select aria-label="模拟支付方式" id="method-${order.id}"><option value="DEMO_CARD">模拟银行卡</option><option value="DEMO_WALLET">模拟钱包</option></select><button class="button outline small" data-order-action="cancel" data-id="${order.id}">取消订单</button><button class="button green small" data-order-action="pay" data-id="${order.id}">模拟支付</button>`
+            : `<select aria-label="模拟支付方式" id="method-${order.id}"><option value="DEMO_WALLET">模拟钱包</option><option value="DEMO_CARD">模拟银行卡</option></select><button class="button outline small" data-order-action="cancel" data-id="${order.id}">取消订单</button><button class="button green small" data-order-action="pay" data-id="${order.id}">模拟支付</button>`
           : order.status === "PAID"
-            ? '<span class="subtle">模拟交易 · 无实际扣款</span>'
+            ? // 钱包支付是真的从余额里扣了钱的，再写「无实际扣款」就是对用户撒谎。
+              `<span class="subtle">${
+                order.paymentMethod === "DEMO_WALLET"
+                  ? "已从我的钱包扣款"
+                  : "模拟交易 · 无实际扣款"
+              }</span>`
             : `<span class="subtle">${order.closeReason === "TIMEOUT" ? "超时未支付 · 库存已归还，可以重新下单" : "库存已归还"}</span>`;
         const countdown = pending
           ? `<div class="order-meta">剩余支付时间 <strong data-deadline="${esc(String(order.expiresAt).slice(0, 19))}">${clockText(leftMs(order))}</strong></div>`
@@ -394,6 +456,7 @@ async function orderAction(button) {
   const { id, orderAction: action } = button.dataset;
   button.disabled = true;
   try {
+    const wallet = action === "pay" && document.getElementById("method-" + id).value === "DEMO_WALLET";
     const body =
       action === "pay"
         ? JSON.stringify({
@@ -403,10 +466,14 @@ async function orderAction(button) {
     await api(`/api/orders/${id}/${action}`, { method: "POST", body });
     toast(
       action === "pay"
-        ? "模拟支付成功，没有发生真实扣款"
+        ? wallet
+          ? "支付成功，已从我的钱包扣款"
+          : "模拟支付成功，没有发生真实扣款"
         : "订单已取消，库存已归还",
     );
     await Promise.all([loadOrders(), loadProducts()]);
+    // 钱包支付会真的扣余额，支付后必须把余额刷一遍，否则页面显示的还是上一次的值。
+    await loadWallet();
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -460,7 +527,7 @@ async function showView(view) {
     orderTicker = null;
   }
   try {
-    if (view === "orders") await loadOrders();
+    if (view === "orders") await Promise.all([loadOrders(), loadWallet()]);
     if (view === "messages") await loadMessages();
   } catch (error) {
     toast(error.message, true);
@@ -482,6 +549,7 @@ document.addEventListener("click", async (event) => {
     await adjust(Number(button.dataset.adjust), Number(button.dataset.delta));
   if (button.dataset.remove && !busy) await setQuantity(Number(button.dataset.remove), 0);
   if (button.dataset.orderAction) await orderAction(button);
+  if (button.dataset.walletAction === "topup") await topUpWallet(button);
   if (button.dataset.retry) {
     button.disabled = true;
     try {
@@ -522,4 +590,6 @@ setInterval(async () => {
       '<p class="empty">货架暂时加载失败，请刷新页面重试。</p>';
     toast(error.message, true);
   }
+  // 钱包与首屏并行无关，失败也不该挡住货架（loadWallet 自己吞掉异常）。
+  await loadWallet();
 })();

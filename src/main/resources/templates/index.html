@@ -132,6 +132,9 @@
         <div class="info-strip">
           下单预占库存；取消归还库存。重复提交同一请求编号，会返回已有订单。
         </div>
+        <!-- 钱包挂在这里而不是页头：它是「付钱时才知道要看的东西」，
+             放在订单区正好与「选支付方式」这个动作挨着。 -->
+        <div id="wallet" class="wallet-strip hidden"></div>
         <div id="orders" class="order-list"></div>
       </section>
       <section id="messages-view" class="view hidden">

@@ -175,13 +175,27 @@ class MallIntegrationTest {
         var results = parallel(12, i -> orders.pay(order.id(),"student","DEMO_CARD").paymentReceipt());
         assertThat(new HashSet<>(results)).hasSize(1);
         assertThat(count("outbox_event")).isEqualTo(2); assertThat(products.get(1).stock()).isEqualTo(9);
-        assertThatThrownBy(() -> orders.pay(order.id(),"student","DEMO_WALLET")).isInstanceOf(BusinessException.class);
-        assertThatThrownBy(() -> orders.cancel(order.id(),"student")).isInstanceOf(BusinessException.class);
+        // 只断言 isInstanceOf(BusinessException.class) 太宽：任何业务失败（余额不足、订单不存在、
+        // 支付通道没注册）都能让它绿。断言必须回答「为什么失败」——
+        // 已用 DEMO_CARD 付过的订单再拿 DEMO_WALLET 去付，失败原因只能是「换了一种支付方式」。
+        assertThat(catchThrowableOfType(() -> orders.pay(order.id(),"student","DEMO_WALLET"),
+                BusinessException.class).code())
+                .as("已支付订单换支付方式：必须是 PAYMENT_MISMATCH，而不是「因为别的原因失败了」")
+                .isEqualTo("PAYMENT_MISMATCH");
+        assertThat(catchThrowableOfType(() -> orders.cancel(order.id(),"student"),
+                BusinessException.class).code())
+                .as("已支付订单不能取消：必须是 INVALID_STATE")
+                .isEqualTo("INVALID_STATE");
     }
     @Test void concurrentCancellationsRestoreStockOnlyOnce() throws Exception {
         var order = create(); parallel(12, i -> orders.cancel(order.id(),"student"));
         assertThat(products.get(1).stock()).isEqualTo(10); assertThat(count("outbox_event")).isEqualTo(2);
-        assertThatThrownBy(() -> orders.pay(order.id(),"student","DEMO_CARD")).isInstanceOf(BusinessException.class);
+        // 同上：已取消的订单去支付，失败原因必须是 INVALID_STATE（closeReason=USER），
+        // 而不是超时关闭的 ORDER_EXPIRED——后者说明关单原因被写错了。
+        assertThat(catchThrowableOfType(() -> orders.pay(order.id(),"student","DEMO_CARD"),
+                BusinessException.class).code())
+                .as("已取消订单不能支付：必须是 INVALID_STATE（主动取消，不是超时关闭）")
+                .isEqualTo("INVALID_STATE");
     }
     @Test void paymentAndCancellationRaceHasOneWinner() throws Exception {
         var order = create();
