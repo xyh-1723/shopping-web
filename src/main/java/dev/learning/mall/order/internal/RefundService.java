@@ -221,7 +221,18 @@ public class RefundService implements OrderRefunds {
         }
         // 第二段：到了 REFUNDED 才动手。两个时刻是两次不同的取值，
         // 因为它们本来就是两件事——批准的时刻、钱真的动了（并从 corrupt 状态出来）的时刻。
-        if (refunds.markRefunded(refundId, LocalDateTime.now(clock)) != 1) return;
+        //
+        // ⚠ 这里的 0 行分支必须「抛」，绝不能像上一版那样静默 return：
+        // 静默 return 会让整笔退款停在 APPROVED——既没放款、也没发站内信，还不报错。
+        // 「不红不报错」是失败里最坏的一种：对账时看到 APPROVED 会以为「正在处理」，
+        // 线上会一直挂着，而唯一知道它发生了的人只有那个恰好翻到这条日志的人。
+        //
+        // 这段路径理论上不可达（同一个事务里 markApproved 刚影响 1 行，紧接着 markRefunded
+        // 必然命中）。正因为不可达才更不能静默：一旦它被走到，就是并发或状态机被破坏的
+        // 强信号——把「我以为不可能」变成一条 409 抛出去，是我们唯一能收到这个信号的方式。
+        if (refunds.markRefunded(refundId, LocalDateTime.now(clock)) != 1) {
+            throw BusinessException.conflict("ALREADY_RESOLVED", "这笔退款已经处理过了");
+        }
         if (FULFILLMENT_NONE.equals(order.fulfillmentStatus())) {
             for (OrderView.Item item : orders.items(order.id())) {
                 catalog.returnStock(item.productId(), item.quantity(), decidedBy, order.id());
