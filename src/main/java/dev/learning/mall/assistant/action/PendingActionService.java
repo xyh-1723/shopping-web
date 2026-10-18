@@ -12,8 +12,10 @@ import dev.learning.mall.order.api.OrderCancellation;
 import dev.learning.mall.order.api.OrderCheckout;
 import dev.learning.mall.order.api.OrderInsights;
 import dev.learning.mall.order.api.OrderPayments;
+import dev.learning.mall.order.api.OrderRefunds;
 import dev.learning.mall.order.api.OrderView;
 import dev.learning.mall.order.api.QuoteSnapshot;
+import dev.learning.mall.order.api.RefundView;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -52,6 +54,7 @@ public class PendingActionService {
     public static final String KIND_ORDER_PAYMENT = "ORDER_PAYMENT";
     public static final String KIND_ORDER_CREATE = "ORDER_CREATE";
     public static final String KIND_ORDER_CANCEL = "ORDER_CANCEL";
+    public static final String KIND_ORDER_REFUND = "ORDER_REFUND";
 
     /**
      * 本轮产生的待确认动作，挂在 {@link TurnScope} 的轮次上下文里。
@@ -66,6 +69,7 @@ public class PendingActionService {
     private record ActionRow(String id, String username, String conversationId, String kind,
                              String orderId, BigDecimal amount, String method, String status,
                              String idempotencyKey, String linesJson, String quoteId,
+                             String refundReasonCode, String refundReasonText,
                              LocalDateTime expiresAt) {}
 
     /** 确认/取消的结果：动作最新视图 + 执行后的订单（未产生订单变更时为 null）。 */
@@ -73,7 +77,8 @@ public class PendingActionService {
 
     private static final String SELECT =
             "SELECT id, username, conversation_id, kind, order_id, amount, payment_method AS method, "
-                    + "status, idempotency_key, lines_json, quote_id, expires_at "
+                    + "status, idempotency_key, lines_json, quote_id, refund_reason_code, "
+                    + "refund_reason_text, expires_at "
                     + "FROM assistant_pending_action ";
 
     private final JdbcClient jdbc;
@@ -82,6 +87,7 @@ public class PendingActionService {
     private final OrderCheckout checkout;
     private final OrderCancellation cancellation;
     private final QuoteSnapshot quotes;
+    private final OrderRefunds refunds;
     private final AssistantSecurityProperties security;
     private final AssistantAudit audit;
     private final ObjectMapper json;
@@ -90,14 +96,16 @@ public class PendingActionService {
 
     public PendingActionService(JdbcClient jdbc, OrderInsights insights, OrderPayments payments,
                                 OrderCheckout checkout, OrderCancellation cancellation, QuoteSnapshot quotes,
-                                AssistantSecurityProperties security, AssistantAudit audit,
-                                ObjectMapper json, ObjectProvider<PendingActionService> self) {
+                                OrderRefunds refunds, AssistantSecurityProperties security,
+                                AssistantAudit audit, ObjectMapper json,
+                                ObjectProvider<PendingActionService> self) {
         this.jdbc = jdbc;
         this.insights = insights;
         this.payments = payments;
         this.checkout = checkout;
         this.cancellation = cancellation;
         this.quotes = quotes;
+        this.refunds = refunds;
         this.security = security;
         this.audit = audit;
         this.json = json;
@@ -109,6 +117,7 @@ public class PendingActionService {
         return switch (kind) {
             case KIND_ORDER_CREATE -> "下单确认";
             case KIND_ORDER_CANCEL -> "取消确认";
+            case KIND_ORDER_REFUND -> "退款确认";
             default -> "支付确认";
         };
     }
@@ -121,6 +130,7 @@ public class PendingActionService {
         return switch (kind) {
             case KIND_ORDER_CREATE -> "HITL_ORDER";
             case KIND_ORDER_CANCEL -> "HITL_CANCEL";
+            case KIND_ORDER_REFUND -> "HITL_REFUND";
             default -> "HITL_PAY";
         };
     }
@@ -257,6 +267,66 @@ public class PendingActionService {
         return view;
     }
 
+    /**
+     * 工具入口：为本人一笔已支付订单创建退款确认请求。<b>不退任何钱、不动任何库存</b>。
+     *
+     * <p>走 refund 这一路而不是复用取消出入口（{@code ORDER_CANCEL}）：
+     * 取消的前提是「还没付钱」，退款的前提是「钱已经给出去了」，两者是反向操作，
+     * 混在一个 kind 里只会让「到底发生了什么」在事后不可读。
+     *
+     * <p><b>只在这个方法里校验一次订单归属</b>而把「能不能退」留给 {@code RefundService}：
+     * 这里负责的是「这是不是你的订单」（LLM06 过度代理的那一道闸门），
+     * 业务判定（发货了吗、超窗了吗、超金额了吗）只有订单模块那份实现说了算。
+     *
+     * <p><b>为什么<b>不</b>把商家审批也搬进来</b>：见 {@code MerchantRefundController} 的类注释——
+     * HITL 的语义是「模型替人发起、<b>本人</b>确认」，而审批在定义上就是另一个人。
+     *
+     * @param amount     拟退金额（元，两位小数）；{@code null} = 退这笔订单实付的全部
+     * @param reasonCode 退款原因码；为空按 {@code NO_REASON}（无理由）处理
+     */
+    public PendingActionView requestOrderRefund(String username, String orderId, BigDecimal amount,
+                                                String reasonCode, String reasonText) {
+        OrderView order = insights.ordersOf(username).stream()
+                .filter(o -> o.id().equals(orderId)).findFirst()
+                .orElseThrow(() -> BusinessException.notFound("订单不存在或不属于当前用户"));
+        if (!"PAID".equals(order.status())) {
+            throw BusinessException.conflict("INVALID_STATE", "只有已支付的订单才能申请退款");
+        }
+        // 已出现的同类待确认卡片直接复用：模型可能在一轮里把同一个工具调两次，
+        // 刷两张卡的结果只会让买家以为要退两笔。
+        Optional<ActionRow> existing = jdbc.sql(SELECT
+                        + "WHERE username = :user AND order_id = :order AND kind = :kind "
+                        + "AND status = 'PENDING' AND expires_at > CURRENT_TIMESTAMP ORDER BY seq DESC LIMIT 1")
+                .param("user", username).param("order", orderId).param("kind", KIND_ORDER_REFUND)
+                .query(ActionRow.class).optional();
+        if (existing.isPresent()) return toView(existing.get());
+
+        String conversationId = TurnScope.conversationId();
+        String id = UUID.randomUUID().toString();
+        LocalDateTime expires = LocalDateTime.now().plusMinutes(security.getPaymentConfirmTtlMinutes());
+        jdbc.sql("INSERT INTO assistant_pending_action(id,username,conversation_id,kind,order_id,"
+                        + "amount,refund_reason_code,refund_reason_text,status,expires_at) "
+                        + "VALUES(:id,:user,:conv,:kind,:order,:amount,:code,:text,'PENDING',:expires)")
+                .param("id", id)
+                .param("user", username)
+                .param("conv", conversationId)
+                .param("kind", KIND_ORDER_REFUND)
+                .param("order", orderId)
+                // 金额同样服务端算出：模型只能表达「退多少」或「全退」，
+                // 卡片上显示的数必须和待会儿真退的数一致，不能有两个来源。
+                .param("amount", amount == null ? order.payAmount() : amount)
+                .param("code", reasonCode == null ? "NO_REASON" : reasonCode.strip().toUpperCase(Locale.ROOT))
+                .param("text", reasonText)
+                .param("expires", expires)
+                .update();
+        audit.record(username, conversationId, AssistantAudit.STAGE_TOOL, "PENDING",
+                auditPrefix(KIND_ORDER_REFUND) + "_REQUEST", "LLM06",
+                "发起退款确认：订单 " + orderId.substring(0, 8));
+        PendingActionView view = toView(rowById(id).orElseThrow());
+        TurnScope.attribute(ATTRIBUTE_CREATED, view);
+        return view;
+    }
+
     /** 某会话下仍未过期的待确认动作（页面刷新后重新找回确认卡片）。 */
     public List<PendingActionView> pendingOf(String username, String conversationId) {
         return jdbc.sql(SELECT + "WHERE username = :user AND conversation_id = :conv "
@@ -345,6 +415,22 @@ public class PendingActionService {
                             "HITL_CANCEL_CONFIRM", "LLM06",
                             "本人确认取消订单：" + row.orderId().substring(0, 8));
                     yield cancelled;
+                }
+                case KIND_ORDER_REFUND -> {
+                    // 走的同样是页面 POST /api/orders/{id}/refunds 那一份实现：
+                    // 分流判定、库存幂等、放款条件因此只存在一份，
+                    // 不会分叉成「助手路径能自助退、页面路径要等商家」。
+                    RefundView refund = refunds.apply(row.orderId(), username, row.amount(),
+                            row.refundReasonCode(), row.refundReasonText());
+                    audit.record(username, row.conversationId(), AssistantAudit.STAGE_TOOL, "CONFIRM",
+                            auditPrefix(row.kind()) + "_CONFIRM", "LLM06",
+                            "本人确认退款：订单 " + row.orderId().substring(0, 8)
+                                    + "，金额 ¥" + row.amount()
+                                    + "，结果 " + refund.status());
+                    // 退款是 order 的子状态机，不改变 OrderView.status，
+                    // 因此这里返回订单原视图（退款结果看上面的 RefundView 与刷新后的 /api/refunds/mine）。
+                    yield insights.ordersOf(username).stream()
+                            .filter(o -> o.id().equals(row.orderId())).findFirst().orElseThrow();
                 }
                 default -> throw new IllegalStateException("未知的待确认动作类型：" + row.kind());
             };

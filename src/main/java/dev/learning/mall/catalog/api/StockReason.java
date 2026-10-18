@@ -3,12 +3,18 @@ package dev.learning.mall.catalog.api;
 /**
  * 库存变动的原因。
  *
- * <p>取值与 {@code stock_ledger.reason} 的 CHECK 约束（V14 的 {@code ck_ledger_reason}）
- * 一一对应：数据库是最后一道防线，枚举是编译期防线，两边都不允许出现第四种原因。
+ * <p>取值与 {@code stock_ledger.reason} 的 CHECK 约束（V14 起的 {@code ck_ledger_reason}，
+ * V17 换成 {@code ck_ledger_reason_v2}）一一对应：数据库是最后一道防线，枚举是编译期防线，
+ * 两边都不允许出现第五种原因。
  *
- * <p>为什么原因只有三类：因为全项目改 {@code product.stock} 的地方只有三个——
- * 下单预占、关单归还、店员补货。枚举的取值集合就是「谁有资格改库存」这份清单，
+ * <p>为什么原因有四类：因为全项目改 {@code product.stock} 的地方有四个——
+ * 下单预占、关单归还、店员补货、退款归还。枚举的取值集合就是「谁有资格改库存」这份清单，
  * 新增一条改库存的路径时，必须先在这里说清楚它属于哪一类。
+ *
+ * <p><b>{@code RELEASE} 与 {@code REFUND} 为什么必须分开</b>：两者都是「把货还回来」，
+ * 但前者是「这单没成交」，后者是「钱收过了又退回去」。共用同一个原因会让
+ * 「这笔订单到底还过货没有」这条幂等判据没法写（退款方案 §5），也无法区分
+ * 「弃单释放」与「售后退货」两种完全不同的运营口径。
  */
 public enum StockReason {
 
@@ -19,5 +25,8 @@ public enum StockReason {
     RELEASE,
 
     /** 补货：店员把库存直接改成一个确定的值（上架 / 盘点 / 纠错）。 */
-    RESTOCK
+    RESTOCK,
+
+    /** 退款归还：已成交订单退款后退回现货；<b>只对未发货的订单发生</b>（已收货的退款只退钱不还货）。 */
+    REFUND
 }

@@ -116,6 +116,33 @@ public class ProductService implements ProductCatalog {
     }
 
     /**
+     * 归还库存（退款成功后）。流水固定记成 {@link StockReason#REFUND}，理由见接口注释。
+     *
+     * <p>写法与 {@link #release} 只有一处不同：<b>先插流水、并且这条 INSERT 自带
+     * {@code NOT EXISTS} 去重</b>（退款方案 §5.2 闸门 ③）。顺序不能反——
+     * 「这一批货有没有为这笔订单退过」的判据就是「有没有那条流水」，
+     * 所以让流水先落地；它插不进去＝已经退过，此时<b>现货也一步不动</b>，整件事安静跳过。
+     *
+     * <p>这是三道闸门的最后一道：前两道（一次性状态迁移、只有未发货才还货）都在应用层，
+     * 被人绕过时在多数 servidor 路径上会留下错账；这道幂等保证即使有人用应急脚本
+     * 直接 {@code UPDATE product} 再调这个方法，同一笔订单的同一件商品也只会回来一次。
+     *
+     * @param orderId <b>不能为空</b>：它就是这条幂等判据的键，丢了它就无法去重
+     */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public void returnStock(long id, int quantity, String actor, String orderId) {
+        if (quantity <= 0) throw new IllegalArgumentException("quantity must be positive");
+        if (orderId == null || orderId.isBlank())
+            throw new IllegalArgumentException("退款归还必须带订单号：它是「这笔订单退过没有」的唯一判据");
+        int before = repository.stockForUpdate(id);
+        int written = ledger.appendOnce(id, quantity, before, before + quantity,
+                StockReason.REFUND, actor(actor), orderId);
+        // 0 行 = 这笔订单已经为这件商品退过一次了。此刻再还一次就是凭空造货，直接跳过。
+        if (written == 0) return;
+        repository.restore(id, quantity);
+    }
+
+    /**
      * 归一化操作者：流水要能回答「谁动的」，拿不到时宁可写 unknown，
      * 也不要让 NOT NULL 约束把一笔已经扣成功的库存变更连带回滚。
      */

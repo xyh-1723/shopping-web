@@ -53,4 +53,37 @@ class StockLedgerRepository {
                 .param("orderId", orderId)
                 .update();
     }
+
+    /**
+     * 追加一条幂等流水：<b>同一笔订单在同一个理由下对同一件商品只允许一行</b>。
+     *
+     * <p>它是退款归还库存的最后一道闸门（退款方案 §5.2 闸门 ③）。前三道以外的情形——
+     * 应急脚本、复制错的实现、被绕过的服务——走到这里都会被去重挡住：
+     * 第一次 {@code update()} 返回 1，之后的重复调用返回 0，<b>不报错</b>。
+     *
+     * <p>为什么是 {@code INSERT … SELECT … WHERE NOT EXISTS} 而不是「先查再插」：
+     * 查与插是两步，中间夹着一次持有行锁的窗口判断就已经有了竞态；一条语句把这个窗口消掉。
+     *
+     * @return 实际插入的行数（1 = 发生了，0 = 已经存在，什么都没做）
+     */
+    int appendOnce(long productId, int delta, int stockBefore, int stockAfter,
+                   StockReason reason, String actor, String orderId) {
+        return jdbc.sql("INSERT INTO stock_ledger"
+                        + "(product_id, delta, stock_before, stock_after, reason, actor, order_id)"
+                        + " SELECT p.id, :delta, :before, :after, :reason, :actor, :orderId"
+                        + "   FROM product p"
+                        + "  WHERE p.id = :productId"
+                        + "    AND NOT EXISTS (SELECT 1 FROM stock_ledger l"
+                        + "                     WHERE l.order_id = :orderId"
+                        + "                       AND l.reason = :reason"
+                        + "                       AND l.product_id = :productId)")
+                .param("productId", productId)
+                .param("delta", delta)
+                .param("before", stockBefore)
+                .param("after", stockAfter)
+                .param("reason", reason.name())
+                .param("actor", actor)
+                .param("orderId", orderId)
+                .update();
+    }
 }

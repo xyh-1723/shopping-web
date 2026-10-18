@@ -80,14 +80,10 @@ public class DemoWalletPayment implements PaymentGateway {
     /**
      * 放款：把钱打回买家钱包。与 {@link #pay} 只有方向相反，行锁与留痕一步不少。
      *
-     * <p><b>关于 actor 的一处已知缺口（诚实交代）</b>：放款的操作者不是买家本人，
-     * 而是审批退款的商家/管理员，而 {@link RefundRequest} 目前没有携带这个身份。
-     * 这里传 {@code null}，由 {@code WalletService} 落成 {@code unknown}——
-     * <b>宁可写 unknown，也不要把它记成「买家给自己退了一笔钱」</b>，
-     * 那会让审计在对账时得出完全相反的结论。
-     * T20 把 {@code RefundService.disburse} 接上来时应当顺手补上审批人身份
-     * （例如给 {@code RefundRequest} 加一个 {@code actor} 字段）；
-     * 本轮不为一个还没有消费者的字段预留位置。
+     * <p><b>actor 是放款责任人，不是收款人</b>：无理由退款由系统判定，那是 {@code SYSTEM}；
+     * 需要商家确认的退款，是那位按下「批准」的商家账号。
+     * {@link RefundRequest#actor()} 因此在构造时就是必填项（缺失直接报错），
+     * 于是流水的 actor 列永远答得出「这笔钱是谁放出来的」。
      *
      * @throws dev.learning.mall.common.BusinessException
      *         同一订单重复放款会被 {@code (order_id, reason)} 唯一索引拒绝
@@ -95,7 +91,7 @@ public class DemoWalletPayment implements PaymentGateway {
     @Override
     public String refund(RefundRequest request) {
         long cents = MoneyUnits.toCents(request.amount());
-        wallets.credit(request.username(), cents, null, request.orderId());
+        wallets.credit(request.username(), cents, request.actor(), request.orderId());
         return refundReceipt(request);
     }
 

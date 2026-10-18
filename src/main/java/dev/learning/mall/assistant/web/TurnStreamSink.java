@@ -48,6 +48,7 @@ final class TurnStreamSink implements TurnListener {
             Map.entry("requestPayment", "正在准备支付确认"),
             Map.entry("createOrder", "正在准备下单确认"),
             Map.entry("cancelOrder", "正在准备取消确认"),
+            Map.entry("requestRefund", "正在准备退款确认"),
             Map.entry("searchKnowledge", "正在查帮助文档"),
             Map.entry("inventoryAlerts", "正在盘点库存"),
             Map.entry("salesOverview", "正在汇总经营数据"),

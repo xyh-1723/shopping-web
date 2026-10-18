@@ -47,6 +47,16 @@ public class SecurityConfig {
                 .requestMatchers("/api/assistant/audit").hasRole("STAFF")
                 // Agent 运行轨迹同样只对店员开放：里面含工具参数与回答摘要，属于运营侧数据。
                 .requestMatchers("/api/assistant/runs", "/api/assistant/runs/*/steps").hasRole("STAFF")
+                // 退款审批只对商家开放：钱的决定权与运营执行权分离（设计 §3.4）。
+                // 这里刻意用 hasRole("MERCHANT") 而不是 hasAnyRole("STAFF","MERCHANT")：
+                // 让店员能批退款，等于把「店员自己申请退款自己批准」这条路打开。
+                // 审批同时也是 RefundService 内部二次校验的<b>外层</b>——少一层都不算够。
+                .requestMatchers(HttpMethod.POST, "/api/refunds/*/approve", "/api/refunds/*/reject")
+                    .hasRole("MERCHANT")
+                // 待审批队列是经营侧可见性（只读）：店员与商家都能看，但普通买家不能。
+                .requestMatchers(HttpMethod.GET, "/api/refunds/pending").hasAnyRole("STAFF", "MERCHANT")
+                // 注意：这条 GET 的 /api/refunds/mine 是买家看自己的退款，落到 anyRequest().authenticated()，
+                // 由 RefundService 按订单归属再收一层，不需要在这里特别放行。
                 .anyRequest().authenticated())
             .formLogin(login -> login.loginPage("/login").defaultSuccessUrl("/", true).permitAll())
             .logout(logout -> logout.logoutSuccessUrl("/"))

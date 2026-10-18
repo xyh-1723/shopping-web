@@ -18,6 +18,13 @@ mall:
     auto-receive-enabled: false
     auto-receive-scan-delay-ms: 3600000
     auto-receive-initial-delay-ms: 3600000
+    # 退款：测试里显式写出与生产同一组阈值——它们是「自助还是等商家」的真相来源，
+    # 测试不该悄悄继承默认值。需要改阈值的用例（RefundRoutingTest#thresholdsComeFromProperties）
+    # 在自己的 @SpringBootTest(properties=...) 里覆盖，而不是改这里。
+    refund:
+      enabled: true
+      auto-refund-window-hours: 24
+      auto-refund-max-amount: 200
   # 钱包：测试里用与生产同一组额度，但显式写出来——
   # 额度是「开户授予多少」的真相来源，测试不该悄悄继承默认值而不自知。
   wallet:

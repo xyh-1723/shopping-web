@@ -43,7 +43,8 @@ public interface PaymentGateway {
      * <p>幂等由钱包流水上 {@code (order_id, reason)} 的唯一索引兜底：
      * 同一笔订单重复放款会被数据库拒绝，而不是记两笔入账。
      *
-     * @param request 放款请求（订单号、收款账户、原支付凭证、金额）
+     * @param request 放款请求：订单号、收款账户、原支付凭证、金额，
+     *                以及<b>放款责任人</b>（无理由退款是 {@code SYSTEM}，商家批准是那位商家的账号）
      * @return 放款凭证
      * @throws dev.learning.mall.common.BusinessException
      *         {@code REFUND_UNSUPPORTED}（400）该通道形不成退款（钱压根没进来过）

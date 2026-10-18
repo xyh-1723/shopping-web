@@ -69,6 +69,12 @@ class WalletPaymentTest {
      */
     private static final long ORDER_CENTS = 4_700L;
 
+    /** 放款责任人：无理由退款（AUTO 路由）的代表值。 */
+    private static final String ACTOR_SYSTEM = "SYSTEM";
+
+    /** 放款责任人：商家批准路径的代表值。 */
+    private static final String ACTOR_APPROVER = "merchant";
+
     @Autowired OrderFacade facade;
     @Autowired OrderPayments payments;
     @Autowired OrderInsights insights;
@@ -314,7 +320,7 @@ class WalletPaymentTest {
 
         BusinessException rejected = catchThrowableOfType(
                 () -> card.refund(new RefundRequest(order.id(), u, "SIM-CARD-" + order.id(),
-                        order.total())),
+                        order.total(), "merchant")),
                 BusinessException.class);
 
         assertThat(rejected).as("没有资金落点的退款必须报错，不能静默返回一张凭证").isNotNull();
@@ -327,7 +333,8 @@ class WalletPaymentTest {
         // 哨兵自证：钱包通道的放款<b>不</b>抛。少了这一句，上面的红也可能来自
         // 「所有 refund 都会抛」——那样它就是一条恒绿的空断言。
         assertThatCode(() -> tx().executeWithoutResult(s -> router.get("DEMO_WALLET")
-                .refund(new RefundRequest(order.id(), u, "SIM-CARD-" + order.id(), order.total()))))
+                .refund(new RefundRequest(order.id(), u, "SIM-CARD-" + order.id(), order.total(),
+                        ACTOR_SYSTEM))))
                 .doesNotThrowAnyException();
         assertThat(WalletProbe.deltas(jdbc, u, "REFUND")).hasSize(1);
     }
@@ -350,7 +357,7 @@ class WalletPaymentTest {
         assertThat(WalletProbe.balanceCents(jdbc, u)).isEqualTo(grant - ORDER_CENTS);
 
         String refundReceipt = tx().execute(s -> router.get("DEMO_WALLET")
-                .refund(new RefundRequest(order.id(), u, receipt, order.total())));
+                .refund(new RefundRequest(order.id(), u, receipt, order.total(), ACTOR_APPROVER)));
 
         assertThat(WalletProbe.balanceCents(jdbc, u))
                 .as("退款必须真的把钱放回同一个钱包：放款是 mock 时余额纹丝不动")
@@ -365,11 +372,16 @@ class WalletPaymentTest {
                 .isEqualTo(order.id());
         // 放款凭证要能反查当初那笔收款——这是 originalReceipt 存在的理由，也是它今天的消费者。
         assertThat(refundReceipt).isEqualTo("SIM-REFUND-" + order.id() + "/" + receipt);
-        // actor 的已知缺口：放款人不是买家本人，而 RefundRequest 目前不带审批人身份，
-        // 因此这里落成 unknown。宁可 unknown，也不要把它记成「买家给自己退了一笔钱」。
+        // actor 记录的是<b>放款责任人</b>：审批退款的商家（无理由退款则是 SYSTEM），
+        // 从来不是收款的买家本人。记成买家 = 「买家自己给自己退了一笔钱」，
+        // 记成 unknown = 「没人知道这笔钱是谁放出来的」，两种都是错的。
         assertThat(jdbc.sql("SELECT actor FROM wallet_ledger WHERE username = :u"
                         + " AND reason = 'REFUND'").param("u", u).query(String.class).single())
-                .isEqualTo("unknown");
+                .isEqualTo(ACTOR_APPROVER);
+        // 缺 actor 直接炸：宁可在构造请求时就红，也不要等到事后对账发现这笔钱没有责任人。
+        assertThatThrownBy(() -> new RefundRequest(order.id(), u, receipt, order.total(), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("放款责任人");
     }
 
     // ——————————————————— 助手代付的默认值 ———————————————————

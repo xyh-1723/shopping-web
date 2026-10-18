@@ -136,6 +136,13 @@ mall:
     auto-receive-scan-delay-ms: 60000
     auto-receive-initial-delay-ms: 20000
     auto-receive-max-per-scan: 200
+  # 退款（N2）：两个落点——AUTO（无理由、买家自助）与 MERCHANT_APPROVAL（商家审批）。
+  # 可配的只有「时间」与「金额」两条；第三条判据「订单未发货」是硬规则，写在代码里，
+  # 刻意不给它一个开关（给了，它一定会在某次排障时被打开）。
+  refund:
+    enabled: true                # 关掉它 = 回到「付完钱就是终态」的旧行为，仅用于演示对比
+    auto-refund-window-hours: 24 # 按 paid_at 计，不是 created_at：那会儿钱还没进来
+    auto-refund-max-amount: 200  # 不超过最高促销档 199 的自然边界
   # 主动服务：关注（降价/补货提醒）+ 关联推荐。
   # 提醒由两条路触发：商品变更事件（及时）+ 定时扫描（兜底，保证不漏）。
   proactive:

@@ -22,6 +22,19 @@ public interface ProductCatalog {
     void release(long productId, int quantity, String actor, String orderId);
 
     /**
+     * 归还库存（退款成功后）。参数含义同 {@link #reserve}。
+     *
+     * <p>与 {@link #release} 的差异只有一个：<b>流水记成 {@code REFUND} 而不是 {@code RELEASE}</b>。
+     * 为什么要一个独立的方法而不是让 {@link #release} 多收一个 {@code reason} 参数：
+     * 交给调用方传，就等于允许退款路径传 {@code 'RELEASE'} 把售后退货伪装成弃单释放，
+     * 于是「这笔订单还过货没有」这条幂等判据失效（退款方案 §5）。
+     * 固定 reason 之后，两类归还仍然收敛在同一个写节点 {@code ProductService} 上。
+     *
+     * @param actor   谁退的这笔钱（退 AUTO 时是 {@code SYSTEM}，商家批准时是商家账号）
+     */
+    void returnStock(long productId, int quantity, String actor, String orderId);
+
+    /**
      * 改价（仅店员可用，权限在 Web 层与 SecurityConfig 双重限制）。
      *
      * <p>放在商品模块而不是运营后台，是因为价格<b>属于商品</b>：改价要改的是商品表的那一列，

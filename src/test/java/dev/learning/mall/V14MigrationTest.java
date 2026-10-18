@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,14 +41,37 @@ class V14MigrationTest {
     void stockLedgerConstraintsAreNamedAndPresent() {
         Set<String> names = constraintNames("STOCK_LEDGER");
 
-        assertThat(names).contains("CK_LEDGER_REASON", "CK_LEDGER_DELTA_NONZERO",
+        // ① 完整集合而不是「包含即可」——两个方向都要能抓住。
+        //
+        //    · 改回去：V17 为了让退款归还留痕，把 ck_ledger_reason（三类原因）
+        //      换成了 ck_ledger_reason_v2（四类，多一个 REFUND）。只写 contains(...)
+        //      的话，有人把约束改回旧名字（REFUND 随之从值集合里消失）这条测试照样绿，
+        //      而那时退款归还库存会在 INSERT 上当场崩——崩在售后，不在构建里。
+        //    · 乱加值：多出任何一条 CHECK 这里立刻红，逼着加约束的人说清楚它守什么。
+        //
+        //    所以是「恰好这四条」：集合的完整性本身就是断言，不是实现细节。
+        assertThat(names).containsExactlyInAnyOrder("CK_LEDGER_REASON_V2", "CK_LEDGER_DELTA_NONZERO",
                 "CK_LEDGER_STOCK_NONNEG", "CK_LEDGER_ARITHMETIC");
         // 这条断言守的是「写法」而不是「结果」：将来有人图省事改回内联 CHECK，
         // 约束依然生效、名字却变成自动名，只有这一句会拦住他。
         assertThat(names).noneMatch(name -> name.startsWith("CONSTRAINT_"));
 
+        // ② 名字对了不等于值集合对了：把 REFUND 从 IN(...) 里删掉、约束名却原样保留，
+        //    上面那一句是看不见的。这里用一次真实写入把它钉住——
+        //    名字管「谁在守」，写入管「守的是不是那四个值」。
+        assertThat(insertLedger("v14-refund-probe", "REFUND", 1, 10, 11))
+                .as("REFUND 必须是合法原因：退款归还库存靠这个值写流水")
+                .isEqualTo(1);
+        // 老值仍然合法作为反向对照：换约束是扩值，不是换语义。
+        assertThat(insertLedger("v14-release-probe", "RELEASE", 1, 10, 11)).isEqualTo(1);
+
         assertThat(columnsOf("STOCK_LEDGER")).contains("PRODUCT_ID", "DELTA", "STOCK_BEFORE",
                 "STOCK_AFTER", "REASON", "ACTOR", "ORDER_ID", "CREATED_AT");
+    }
+
+    @AfterEach
+    void cleanUp() {
+        jdbc.sql("DELETE FROM stock_ledger WHERE order_id LIKE 'v14-%-probe'").update();
     }
 
     @Test
@@ -99,6 +123,19 @@ class V14MigrationTest {
                         + " WHERE actor = 'flyway-v14' AND product_id BETWEEN 1 AND 6")
                 .query(Long.class).single();
         assertThat(baseline).isEqualTo(6);
+    }
+
+    /** 插一条库存流水（{@code order_id} 是本文件清理探针行的钥匙）。 */
+    private int insertLedger(String orderId, String reason, int delta, int before, int after) {
+        return jdbc.sql("INSERT INTO stock_ledger"
+                        + "(product_id, delta, stock_before, stock_after, reason, actor, order_id)"
+                        + " VALUES (1, :delta, :before, :after, :reason, 'v14-tester', :orderId)")
+                .param("delta", delta)
+                .param("before", before)
+                .param("after", after)
+                .param("reason", reason)
+                .param("orderId", orderId)
+                .update();
     }
 
     private int insertQuote(String id, String subtotal, String discount, String fee, String payable) {

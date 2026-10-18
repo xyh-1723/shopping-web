@@ -1,6 +1,9 @@
 package dev.learning.mall.order.internal;
 
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
+import java.math.BigDecimal;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
@@ -61,6 +64,27 @@ public class OrderProperties {
     @Min(1)
     private int autoReceiveMaxPerScan = 200;
 
+    /**
+     * 退款（N2）的分流配置。
+     *
+     * <p><b>只有「时间」与「金额」在这里</b>，第三条判据「订单未发货」刻意<b>不</b>进来：
+     * 它是硬规则，写在 {@link RefundService#routeOf} 里。把它做成可配，
+     * 等于给「货已签收还能一键自助退款」留一个开关，而发生事故时开关一定是打开的
+     * （因为运维改配置比改代码容易得多）。这与本项目一贯的写法相同：
+     * 权限判定从不读配置，安全边界不进配置。
+     *
+     * <p><b>两个默认值怎么来的</b>：24 小时是「支付完成后一天之内可以反悔」的自然边界；
+     * ¥200 取自既有配置——包邮门槛 ¥99、最高促销档 ¥199，取 200 作为
+     * 「不超过最高促销档」的一档。两个值都要能被测试直接覆盖，
+     * 于是 {@link RefundRoutingTest} 把它改成 1 小时 / ¥1 来验证<b>判定确实读了配置</b>。
+     */
+    @Valid
+    private final Refund refund = new Refund();
+
+    public Refund getRefund() {
+        return refund;
+    }
+
     public int getPaymentTimeoutMinutes() { return paymentTimeoutMinutes; }
     public void setPaymentTimeoutMinutes(int paymentTimeoutMinutes) { this.paymentTimeoutMinutes = paymentTimeoutMinutes; }
     public boolean isAutoCloseEnabled() { return autoCloseEnabled; }
@@ -81,4 +105,42 @@ public class OrderProperties {
     public void setAutoReceiveInitialDelayMs(long autoReceiveInitialDelayMs) { this.autoReceiveInitialDelayMs = autoReceiveInitialDelayMs; }
     public int getAutoReceiveMaxPerScan() { return autoReceiveMaxPerScan; }
     public void setAutoReceiveMaxPerScan(int autoReceiveMaxPerScan) { this.autoReceiveMaxPerScan = autoReceiveMaxPerScan; }
+
+    /**
+     * 退款配置。
+     *
+     * <p>字段<b>刻意只有三个有消费者</b>：没有 {@code max-active-per-order} 那个键，
+     * 因为「同一订单只能有一笔在途退款」已经由数据库的 {@code uq_refund_inflight}
+     * 唯一索引强制保证了——做成配置项，就变成一个改了也不生效的旋钮（比没有更坏）。
+     */
+    public static class Refund {
+
+        /** 总开关：关掉它 = 回到「付完钱就是终态」的旧行为（仅用于排障与演示对比）。 */
+        private boolean enabled = true;
+
+        /**
+         * 无理由退款窗口：支付完成后多少小时内可自助退。
+         *
+         * <p>按 {@code paid_at} 计，<b>不是</b> {@code created_at}——
+         * 后者是下单时刻，那时候钱还没进来，谈不上退。
+         */
+        @Min(1)
+        private int autoRefundWindowHours = 24;
+
+        /**
+         * 无理由退款的单笔金额上限（含边界）：超过就要商家点头。
+         *
+         * <p>单位是「元」，与商品价格、订单金额同一口径；
+         * 需要比较大小时一律经 {@code MoneyUnits.toCents} 换算成整数分再比。
+         */
+        @DecimalMin("0.01")
+        private BigDecimal autoRefundMaxAmount = new BigDecimal("200.00");
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getAutoRefundWindowHours() { return autoRefundWindowHours; }
+        public void setAutoRefundWindowHours(int autoRefundWindowHours) { this.autoRefundWindowHours = autoRefundWindowHours; }
+        public BigDecimal getAutoRefundMaxAmount() { return autoRefundMaxAmount; }
+        public void setAutoRefundMaxAmount(BigDecimal autoRefundMaxAmount) { this.autoRefundMaxAmount = autoRefundMaxAmount; }
+    }
 }
