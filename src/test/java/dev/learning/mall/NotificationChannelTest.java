@@ -124,6 +124,32 @@ class NotificationChannelTest {
         assertThat(sink).as("Sink 照常装配：缺密钥不影响上下文起来").isNotNull();
     }
 
+    // ——————————————————— 长度：不许出现半成功 ———————————————————
+
+    /**
+     * 这个用例守的是 V19 修掉的那个隐患在<b>代码路径上</b>的后果。
+     *
+     * <p>{@code deliver} 是「先写站内信、再写留痕」两步。V19 之前
+     * {@code notification_delivery.content} 只有 400 而 {@code notification.content} 有 500，
+     * 于是文案一过 400 就变成「站内信写成功、留痕写失败」——用户收到通知但投递没有记录，
+     * 而它不红也不报错：异常被 outbox 的重试吸收，滚几轮之后变成死信，
+     * 症状出现在别处（「这条通知怎么没有留痕」）。
+     * 库那一侧的长度不变量由 {@link V19MigrationTest} 守着，这里守的是两步的顺序后果。
+     */
+    @Test
+    @DisplayName("500 字符的文案不会出现「站内信写成功、留痕写失败」的半成功")
+    void longContentDoesNotHalfSucceed() {
+        String content = "z".repeat(500);
+        sink.deliver(eventRow("e-t15-long", content));
+
+        assertThat(notificationCount("e-t15-long")).as("第一步：站内信写成功").isEqualTo(1);
+        assertThat(deliveryCount()).as("第二步：留痕也必须写成功，不能停在半成功").isEqualTo(1);
+        // 两侧都要断言「正文是完整的」：只断言留痕那侧的话，
+        // 「把站内信的正文悄悄截断」这种写法会全绿——变异测试里它确实绿过一次（N7）。
+        assertThat(notificationContentOf("e-t15-long")).as("站内信的正文不许被截断").hasSize(500);
+        assertThat(columnOf("e-t15-long", "content")).as("留痕的正文不许被截断").hasSize(500);
+    }
+
     // ——————————————————— 幂等：重试不许重复留痕 ———————————————————
 
     /**
@@ -226,8 +252,13 @@ class NotificationChannelTest {
 
     /** 造一条真实的 outbox 事件行（走生产 writer），再包成 {@link EventRow} 交给 sink。 */
     private EventRow event(String id) {
-        outbox.insert(id, ORDER, USER, "ORDER_SHIPPED", CONTENT);
-        return new EventRow(id, ORDER, USER, "ORDER_SHIPPED", CONTENT,
+        return eventRow(id, CONTENT);
+    }
+
+    /** 同上，但正文可指定（长文案用例要用 500 字符）。 */
+    private EventRow eventRow(String id, String content) {
+        outbox.insert(id, ORDER, USER, "ORDER_SHIPPED", content);
+        return new EventRow(id, ORDER, USER, "ORDER_SHIPPED", content,
                 "PENDING", 0, LocalDateTime.now(), null, LocalDateTime.now(), null);
     }
 
@@ -255,5 +286,10 @@ class NotificationChannelTest {
     private int notificationCount(String eventId) {
         return jdbc.sql("SELECT COUNT(*) FROM notification WHERE event_id = :id")
                 .param("id", eventId).query(Integer.class).single();
+    }
+
+    private String notificationContentOf(String eventId) {
+        return jdbc.sql("SELECT content FROM notification WHERE event_id = :id")
+                .param("id", eventId).query(String.class).single();
     }
 }
