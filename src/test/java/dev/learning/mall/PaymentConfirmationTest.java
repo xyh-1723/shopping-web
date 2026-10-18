@@ -201,8 +201,12 @@ class PaymentConfirmationTest {
                     assertThat(((BusinessException) e).status().value()).isEqualTo(409);
                     assertThat(((BusinessException) e).code()).isEqualTo("ALREADY_RESOLVED");
                 });
-        assertThatThrownBy(() -> service.resolvePendingAction(pending.id(), "student", false))
-                .isInstanceOf(BusinessException.class);
+        // 已办结的卡片再点「取消」同样是重放：失败原因必须是 ALREADY_RESOLVED，
+        // 而不是「过期」或「别人的卡片」——后两者会让这条用例守错东西。
+        assertThat(catchThrowableOfType(() -> service.resolvePendingAction(pending.id(), "student", false),
+                BusinessException.class).code())
+                .as("已确认的卡片再点取消：必须是 ALREADY_RESOLVED")
+                .isEqualTo("ALREADY_RESOLVED");
         // 两次重放尝试（确认一次、取消一次）各留一条审计
         assertThat(auditCount("HITL_REPLAY")).isEqualTo(2);
     }
@@ -260,8 +264,12 @@ class PaymentConfirmationTest {
         assertThatThrownBy(() -> pendingActions.requestOrderPayment("student", "no-such-order", "DEMO_CARD"))
                 .isInstanceOf(BusinessException.class)
                 .satisfies(e -> assertThat(((BusinessException) e).status().value()).isEqualTo(404));
-        assertThatThrownBy(() -> pendingActions.requestOrderPayment("classmate", order.id(), "DEMO_CARD"))
-                .isInstanceOf(BusinessException.class); // 别人的订单，对 classmate 而言不存在
+        // 别人的订单，对 classmate 而言不存在：断言到 code() 才能区分
+        // 「归属校验生效」和「支付方式不支持 / 订单状态不对」——后两者也会抛 BusinessException。
+        assertThat(catchThrowableOfType(() -> pendingActions.requestOrderPayment("classmate", order.id(), "DEMO_CARD"),
+                BusinessException.class).code())
+                .as("给别人的订单发起支付确认：必须表现为 NOT_FOUND")
+                .isEqualTo("NOT_FOUND");
         OrderView another = newPendingOrder("student");
         assertThatThrownBy(() -> pendingActions.requestOrderPayment("student", another.id(), "BITCOIN"))
                 .isInstanceOf(BusinessException.class)
