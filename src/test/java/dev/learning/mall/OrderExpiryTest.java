@@ -9,6 +9,7 @@ import java.time.Clock;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.function.IntFunction;
 import java.util.stream.IntStream;
@@ -54,18 +55,56 @@ class OrderExpiryTest {
     /** 用来制造「归还库存失败」，验证它与状态变更是不是同生共死。 */
     @MockitoSpyBean ProductCatalog catalog;
 
+    /**
+     * 本类建过的订单号：{@link #noDeliveryTrailIsLeftBehind()} 用它把留痕自查的范围
+     * 收窄到本类自己的行上（为什么要收窄见 {@link DeliveryTrail#residueFor}）。
+     */
+    private static final List<String> seenOrderIds = new CopyOnWriteArrayList<>();
+
+    /**
+     * {@code @AfterAll} 必须是 static，因此拿不到实例的 {@code jdbc}；
+     * 这里由 {@code @BeforeEach} 递一个进来，仅供 {@link #noDeliveryTrailIsLeftBehind()} 使用。
+     */
+    private static JdbcClient trailJdbc;
+
     @BeforeEach void setUp() {
         properties.setAutoCloseEnabled(true);
         properties.setPaymentTimeoutMinutes(15);
         properties.setAutoCloseMaxPerScan(200);
         for (String table : List.of("notification", "outbox_event", "order_item", "mall_order")) jdbc.sql("DELETE FROM " + table).update();
         jdbc.sql("UPDATE product SET stock=10").update();
+        trailJdbc = jdbc;
         at(BASE);
     }
 
     @AfterEach void restore() {
         properties.setAutoCloseEnabled(false);
         reset(catalog);
+        // 留痕表（notification_delivery）的清理：T15 之后每消费一个事件都会多写一行，
+        // 本类的「超时关闭会通知到用户」那条用例就在消费事件。不清理的话残迹会留给下一个测试类。
+        // 全表删而不是按订单号删的理由见 DeliveryTrail#purge。
+        DeliveryTrail.purge(jdbc);
+    }
+
+    /**
+     * 哨兵：本类跑完之后，自己建过的订单在留痕表里一行都不剩。
+     *
+     * <p>它存在的<b>唯一</b>理由是「清理这件事本身无法被变异验证」：
+     * 把上面 {@code restore} 里的那行 {@code purge} 删掉，全量测试仍然全绿——
+     * 没有任何用例按全表计数断言留痕，清理就这么静悄悄地失效了。
+     * 有了这条断言，删掉清理就会变红。
+     *
+     * <p>范围按「本类建过的订单号」收窄，因此与其他测试类的执行顺序无关，
+     * 不会引入「单跑绿、全量红」那种脆弱性（理由见 {@link DeliveryTrail#residueFor}）。
+     */
+    @AfterAll static void noDeliveryTrailIsLeftBehind() {
+        if (trailJdbc == null) {
+            return; // 上下文没起来：没有留痕可查，也没有什么要自查的
+        }
+        assertThat(DeliveryTrail.residueFor(trailJdbc, seenOrderIds))
+                .as("本类建过的订单在 notification_delivery 里必须一行不剩："
+                        + "留痕表的 order_id 没有外键，残迹会一路带到下一个测试类")
+                .isZero();
     }
 
     // ——————————————————— 下单时的承诺 ———————————————————
@@ -357,7 +396,9 @@ class OrderExpiryTest {
     }
 
     private OrderView create() {
-        return facade.create("student", UUID.randomUUID().toString(), new CreateOrderRequest(List.of(new CreateOrderRequest.Line(1, 1))));
+        OrderView order = facade.create("student", UUID.randomUUID().toString(), new CreateOrderRequest(List.of(new CreateOrderRequest.Line(1, 1))));
+        seenOrderIds.add(order.id());
+        return order;
     }
 
     private String statusOf(String id) {

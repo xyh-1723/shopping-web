@@ -40,14 +40,67 @@ class MallIntegrationTest {
     @MockitoSpyBean OutboxRepository outbox;
     @MockitoSpyBean NotificationSink sink;
 
+    /**
+     * 本类建过的订单号：{@link #noDeliveryTrailIsLeftBehind()} 用它把留痕自查的范围
+     * 收窄到本类自己的行上（为什么要收窄见 {@link DeliveryTrail#residueFor}）。
+     *
+     * <p>用并发集合：{@code parallel} 那几条用例是在线程池里跑的。
+     */
+    private static final List<String> seenOrderIds = new CopyOnWriteArrayList<>();
+
+    /**
+     * {@code @AfterAll} 必须是 static，因此拿不到实例的 {@code jdbc}；
+     * 这里由 {@code @BeforeEach} 递一个进来，仅供 {@link #noDeliveryTrailIsLeftBehind()} 使用。
+     */
+    private static JdbcClient trailJdbc;
+
     @BeforeEach void resetData() {
         reset(outbox, sink);
         // 不给测试方法加 @Transactional：每个并发线程必须观察真实的提交和回滚。
         for (String table : List.of("notification", "outbox_event", "order_item", "mall_order")) jdbc.sql("DELETE FROM " + table).update();
         jdbc.sql("UPDATE product SET stock=10").update();
+        trailJdbc = jdbc;
     }
+
+    /**
+     * 留痕表（{@code notification_delivery}）的清理。
+     *
+     * <p>T15 之后 {@link NotificationSink#deliver} 每消费一个事件就往这张表多写一行，
+     * 而本类有 6 条用例在消费事件（{@code processor.process} / {@code worker.handle}）。
+     * 不清理的话，残迹会一路带到下一个测试类——留痕表的 {@code order_id} 没有外键，
+     * 删订单带不走它。全表删而不是按订单号删的理由见 {@link DeliveryTrail#purge}。
+     */
+    @AfterEach void purgeDeliveryTrail() {
+        DeliveryTrail.purge(jdbc);
+    }
+
+    /**
+     * 哨兵：本类跑完之后，自己建过的订单在留痕表里一行都不剩。
+     *
+     * <p>它存在的<b>唯一</b>理由是「清理这件事本身无法被变异验证」：
+     * 把上面那个 {@code @AfterEach} 删掉（哪怕只删 {@code purge} 一行），
+     * 全量测试仍然全绿——没有任何用例按全表计数断言留痕，清理就这么静悄悄地失效了。
+     * 有了这条断言，删掉清理就会变红。
+     *
+     * <p>范围按「本类建过的订单号」收窄，因此与其他测试类的执行顺序无关，
+     * 不会引入「单跑绿、全量红」那种脆弱性（理由见 {@link DeliveryTrail#residueFor}）。
+     */
+    @AfterAll static void noDeliveryTrailIsLeftBehind() {
+        if (trailJdbc == null) {
+            return; // 上下文没起来：没有留痕可查，也没有什么要自查的
+        }
+        assertThat(DeliveryTrail.residueFor(trailJdbc, seenOrderIds))
+                .as("本类建过的订单在 notification_delivery 里必须一行不剩："
+                        + "留痕表的 order_id 没有外键，残迹会一路带到下一个测试类")
+                .isZero();
+    }
+
     CreateOrderRequest request(int quantity) { return new CreateOrderRequest(List.of(new CreateOrderRequest.Line(1, quantity))); }
-    OrderView create() { return facade.create("student", UUID.randomUUID().toString(), request(1)); }
+    OrderView create() {
+        OrderView order = facade.create("student", UUID.randomUUID().toString(), request(1));
+        seenOrderIds.add(order.id());
+        return order;
+    }
     int count(String table) { return jdbc.sql("SELECT COUNT(*) FROM " + table).query(Integer.class).single(); }
     String eventId() { return jdbc.sql("SELECT id FROM outbox_event LIMIT 1").query(String.class).single(); }
     String eventStatus(String id) { return jdbc.sql("SELECT status FROM outbox_event WHERE id=:id").param("id", id).query(String.class).single(); }

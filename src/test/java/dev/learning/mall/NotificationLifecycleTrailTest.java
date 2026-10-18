@@ -16,6 +16,8 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -58,9 +60,21 @@ class NotificationLifecycleTrailTest {
     private final Set<String> users = new LinkedHashSet<>();
     private int stockBefore;
 
+    /**
+     * 本类建过的订单号（跨用例累积）：{@link #noDeliveryTrailIsLeftBehind()} 用它把留痕自查
+     * 的范围收窄到本类自己的行上（为什么要收窄见 {@link DeliveryTrail#residueFor}）。
+     *
+     * <p>{@link #orderIds} 每条用例清一次，不能拿来跨用例自查，所以另存一份。
+     */
+    private static final List<String> seenOrderIds = new CopyOnWriteArrayList<>();
+
+    /** {@code @AfterAll} 必须是 static，拿不到实例的 {@code jdbc}；由 {@code @BeforeEach} 递进来。 */
+    private static JdbcClient trailJdbc;
+
     @BeforeEach
     void setUp() {
         stockBefore = jdbc.sql("SELECT stock FROM product WHERE id = 1").query(Integer.class).single();
+        trailJdbc = jdbc;
     }
 
     @AfterEach
@@ -82,6 +96,28 @@ class NotificationLifecycleTrailTest {
         jdbc.sql("UPDATE product SET stock = :s WHERE id = 1").param("s", stockBefore).update();
         orderIds.clear();
         users.clear();
+    }
+
+    /**
+     * 哨兵：本类跑完之后，自己建过的订单在留痕表里一行都不剩。
+     *
+     * <p>为什么需要它（实测结论）：把上面 {@code cleanUp} 里的留痕清理删掉，
+     * 本类 4 条用例<b>仍然全绿</b>——每条断言的是 {@code (order_id, event_type)} 这一对，
+     * 而四条用例各用各的订单，上一条的残迹根本落不进下一条的查询条件。
+     * 也就是说这里的清理原本处于<b>零覆盖</b>状态。
+     *
+     * <p>范围按本类自己的订单号收窄，所以与执行顺序无关
+     * （理由见 {@link DeliveryTrail#residueFor}）。
+     */
+    @AfterAll
+    static void noDeliveryTrailIsLeftBehind() {
+        if (trailJdbc == null) {
+            return;
+        }
+        assertThat(DeliveryTrail.residueFor(trailJdbc, seenOrderIds))
+                .as("本类建过的订单在 notification_delivery 里必须一行不剩："
+                        + "留痕表的 order_id 没有外键，残迹会带到下一个测试类")
+                .isZero();
     }
 
     // ——————————————————— N1：发货 ———————————————————
@@ -167,6 +203,7 @@ class NotificationLifecycleTrailTest {
         OrderView order = facade.create(username, UUID.randomUUID().toString(),
                 new CreateOrderRequest(List.of(new CreateOrderRequest.Line(1, 1))));
         orderIds.add(order.id());
+        seenOrderIds.add(order.id());
         return payments.pay(order.id(), username, "DEMO_WALLET");
     }
 
