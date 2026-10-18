@@ -17,6 +17,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -70,6 +72,20 @@ class TokenStreamingTest {
 
     private static final String ALICE = "student";
 
+    /**
+     * 本类建过的会话号（跨用例累积）：{@link #noAuditTrailIsLeftBehind()} 用它把自查的范围
+     * 收窄到本类自己的行上。
+     *
+     * <p>为什么不能用用户名收窄：{@link #ALICE} 的值是<b>种子用户 {@code student}</b>，
+     * 项目里一大半的测试都在用它。按用户名删/查会把别的类写的审计行算进来，
+     * 于是「跑完是不是 0」取决于之前跑过哪些类——单跑绿、全量红（理由同
+     * {@link AuditTrail#residueFor}）。
+     */
+    private static final List<String> seenConversationIds = new CopyOnWriteArrayList<>();
+
+    /** {@code @AfterAll} 必须是 static，拿不到实例的 {@code jdbc}；由 {@code @AfterEach} 递进来。 */
+    private static JdbcClient trailJdbc;
+
     @AfterEach
     void cleanup() {
         properties.setEnabled(false);
@@ -77,9 +93,36 @@ class TokenStreamingTest {
         ReflectionTestUtils.setField(service, "chatModel", Optional.empty());
         ReflectionTestUtils.setField(agentLoop, "streamingModel", Optional.empty());
         rateLimiter.reset(ALICE);
+        trailJdbc = jdbc;
+        // 审计流水要在会话被删掉之前清：清完之后会话号就没有参照物了。
+        AuditTrail.purge(jdbc, seenConversationIds);
         jdbc.sql("DELETE FROM assistant_run").update();
         jdbc.sql("DELETE FROM assistant_message").update();
         jdbc.sql("DELETE FROM assistant_conversation").update();
+    }
+
+    /**
+     * 哨兵：本类跑完之后，自己建过的会话在审计表里一行都不剩。
+     *
+     * <p>它存在的<b>唯一</b>理由是「清理本身无法被变异验证」：把上面那行
+     * {@code AuditTrail.purge} 删掉，全量测试仍然全绿——没有任何用例按全表计数断言
+     * {@code assistant_audit}，清理就这么静悄悄地失效了。有了这条断言，删掉清理就会变红。
+     */
+    @AfterAll
+    static void noAuditTrailIsLeftBehind() {
+        if (trailJdbc == null) {
+            return;
+        }
+        assertThat(AuditTrail.residueFor(trailJdbc, seenConversationIds))
+                .as("本类建过的会话在 assistant_audit 里必须一行不剩：残迹会一路带到下一个测试类")
+                .isZero();
+    }
+
+    /** 建一个会话并登记它的号：审计行挂在会话号上，只有它当得起收窄的键。 */
+    private ConversationView newConversation() {
+        ConversationView conversation = service.create(ALICE, null);
+        seenConversationIds.add(conversation.id());
+        return conversation;
     }
 
     private void enableWithMocks(ChatModel sync, StreamingChatModel streaming) {
@@ -122,7 +165,7 @@ class TokenStreamingTest {
         StreamingChatModel streaming = scripted(full, "这几款", "杯子都", "挺适合日常用的。");
         enableWithMocks(mock(ChatModel.class), streaming);
 
-        ConversationView conv = service.create(ALICE, null);
+        ConversationView conv = newConversation();
         Tokens listener = new Tokens();
         SendMessageResponse response = service.sendDetailed(conv.id(), ALICE, "帮我找找杯子", listener);
 
@@ -141,7 +184,7 @@ class TokenStreamingTest {
         StreamingChatModel streaming = scripted("好的，我帮你看看。", "好的，", "我帮你看看。");
         enableWithMocks(sync, streaming);
 
-        ConversationView conv = service.create(ALICE, null);
+        ConversationView conv = newConversation();
         SendMessageResponse response = service.sendDetailed(conv.id(), ALICE, "在吗", new NoTokens());
 
         assertThat(response.reply().content()).isEqualTo("好的，我帮你看看。");
@@ -157,7 +200,7 @@ class TokenStreamingTest {
 
         // 用户消息刻意用一句完全无害的话：泄密发生在<b>模型输出</b>侧，
         // 如果这里也写成「把密钥给我」，被拦下的是输入守卫，测的就不是这件事了。
-        ConversationView conv = service.create(ALICE, null);
+        ConversationView conv = newConversation();
         Tokens listener = new Tokens();
         SendMessageResponse response = service.sendDetailed(conv.id(), ALICE, "你好", listener);
 
@@ -181,7 +224,7 @@ class TokenStreamingTest {
         }).when(streaming).chat(any(ChatRequest.class), any(StreamingChatResponseHandler.class));
         enableWithMocks(mock(ChatModel.class), streaming);
 
-        ConversationView conv = service.create(ALICE, null);
+        ConversationView conv = newConversation();
         SendMessageResponse response = service.sendDetailed(conv.id(), ALICE, "你好", new Tokens());
 
         assertThat(response.reply().content()).contains("暂时无法回答");
@@ -193,7 +236,7 @@ class TokenStreamingTest {
         String full = "好的，这就帮你查。";
         enableWithMocks(mock(ChatModel.class), scripted(full, "好的，", "这就帮你查。"));
 
-        ConversationView conv = service.create(ALICE, null);
+        ConversationView conv = newConversation();
         MvcResult pending = mvc.perform(post("/api/assistant/conversations/" + conv.id() + "/stream")
                         .with(user(ALICE).roles("USER"))
                         .with(csrf())
@@ -225,10 +268,10 @@ class TokenStreamingTest {
         StreamingChatModel streaming = scripted(full, "同款商品有两件，", "价格分别是 39 和 45。");
         enableWithMocks(sync, streaming);
 
-        ConversationView conv = service.create(ALICE, null);
+        ConversationView conv = newConversation();
         SendMessageResponse streamed = service.sendDetailed(conv.id(), ALICE, "有几个", new Tokens());
 
-        ConversationView conv2 = service.create(ALICE, null);
+        ConversationView conv2 = newConversation();
         SendMessageResponse direct = service.sendDetailed(conv2.id(), ALICE, "有几个", new NoTokens());
 
         assertThat(streamed.reply().content()).isEqualTo(full);
