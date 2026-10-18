@@ -62,6 +62,7 @@ public class ToolRegistry {
     private final ProactiveTools proactiveTools;
     private final MemoryTools memoryTools;
     private final StaffTools staffTools;
+    private final MerchantTools merchantTools;
     private final KnowledgeTools knowledgeTools;
     private final PaymentTools paymentTools;
     private final OrderTools orderTools;
@@ -70,7 +71,7 @@ public class ToolRegistry {
 
     public ToolRegistry(CatalogTools catalogTools, CustomerTools customerTools, GuideTools guideTools,
                         CartTools cartTools, WatchTools watchTools, ProactiveTools proactiveTools,
-                        MemoryTools memoryTools, StaffTools staffTools,
+                        MemoryTools memoryTools, StaffTools staffTools, MerchantTools merchantTools,
                         KnowledgeTools knowledgeTools, PaymentTools paymentTools, OrderTools orderTools,
                         AssistantAudit audit, ObjectMapper json) {
         this.catalogTools = catalogTools;
@@ -81,6 +82,7 @@ public class ToolRegistry {
         this.proactiveTools = proactiveTools;
         this.memoryTools = memoryTools;
         this.staffTools = staffTools;
+        this.merchantTools = merchantTools;
         this.knowledgeTools = knowledgeTools;
         this.paymentTools = paymentTools;
         this.orderTools = orderTools;
@@ -100,7 +102,10 @@ public class ToolRegistry {
         targets.add(knowledgeTools); // 知识库检索：所有登录用户；数据范围由工具内部按角色过滤（多租户 RAG）
         targets.add(paymentTools);   // 资金写操作：只「发起」待确认支付，真正执行由用户本人确认（human-in-the-loop）
         targets.add(orderTools);     // 订单写操作：只「发起」下单/取消确认，落单与取消同样由用户本人确认
-        if (actor.isStaff()) targets.add(staffTools); // 店员才看得见店员工具
+        if (actor.isStaff()) targets.add(staffTools);       // 店员才看得见店员工具
+        // 商家才看得见退款审批工具。这里必须判 isMerchant() 而不是 isOperatingSide()：
+        // 用后者会把审批权一并下发给店员，那就等于允许「店员自己申请退款、自己批准」。
+        if (actor.isMerchant()) targets.add(merchantTools);
         Map<String, Object> routes = new LinkedHashMap<>();
         List<ToolSpecification> specs = new ArrayList<>();
         Set<String> effectful = new LinkedHashSet<>();

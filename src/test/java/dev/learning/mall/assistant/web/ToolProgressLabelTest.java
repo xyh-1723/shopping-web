@@ -37,9 +37,13 @@ class ToolProgressLabelTest {
     @DisplayName("每个对用户可见的工具都有中文进度文案，不会退化成一串裸工具名")
     void everyUserVisibleToolHasAChineseLabel() {
         List<String> missing = new ArrayList<>();
+        // MERCHANT 必须也在里面：它有自己的专属工具（退款审批），
+        // 只遍历 USER / STAFF 会让那几个工具漏掉中文文案而无人发现。
         for (AssistantActor actor : List.of(
                 new AssistantActor("label-user", Set.of(AssistantActor.ROLE_USER)),
-                new AssistantActor("label-staff", Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_STAFF)))) {
+                new AssistantActor("label-staff", Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_STAFF)),
+                new AssistantActor("label-merchant",
+                        Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_MERCHANT)))) {
             for (ToolSpecification spec : registry.forActor(actor).specs()) {
                 if (!TurnStreamSink.hasLabel(spec.name())) {
                     missing.add(spec.name());
@@ -64,5 +68,14 @@ class ToolProgressLabelTest {
 
         assertThat(userTools).doesNotContain("inventoryAlerts", "salesOverview", "customerOrders");
         assertThat(staffTools).containsAll(userTools).contains("inventoryAlerts");
+
+        // 商家工具同理：只对商家可见，店员与顾客都拿不到（审批是商家的活）。
+        Set<String> merchantTools = new TreeSet<>();
+        registry.forActor(new AssistantActor("label-merchant",
+                Set.of(AssistantActor.ROLE_USER, AssistantActor.ROLE_MERCHANT)))
+                .specs().forEach(s -> merchantTools.add(s.name()));
+        assertThat(userTools).doesNotContain("pendingRefundQueue", "approveRefund", "rejectRefund");
+        assertThat(staffTools).doesNotContain("pendingRefundQueue", "approveRefund", "rejectRefund");
+        assertThat(merchantTools).contains("pendingRefundQueue", "approveRefund", "rejectRefund");
     }
 }

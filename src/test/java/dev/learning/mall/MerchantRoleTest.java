@@ -186,11 +186,16 @@ class MerchantRoleTest {
         assertThat(status.role()).isEqualTo("MERCHANT");
         assertThat(status.capabilities())
                 .contains("检索内部运营文档（供应商与经营口径）")
+                .as("T13b 后商家真的有退款审批工具，能力清单就得如实列出来")
+                .contains("查询待审批的退款队列", "批准退款申请（立即放款给买家）", "驳回退款申请")
                 .as("商家拿不到 staffTools，把店员能力列上去就是空承诺")
                 .doesNotContain("库存预警与补货建议", "全站经营概览", "按用户名查询订单");
         assertThat(actors.resolve("merchant").capabilityHint())
                 .contains("商家")
-                .contains("退款审批功能尚未开放");
+                .contains("待审批")
+                .as("T13b 后退款审批已真的开放：再写「尚未开放」就是一句与事实相反的陈述，"
+                        + "会让模型对买家说错话（空承诺与谎报能力是同一个毛病的两面）")
+                .doesNotContain("尚未开放");
     }
 
     /** RAG 阶段针对某个 username 的 DENY 条数：用来发现「命中又被过滤」这类自相矛盾的改动。 */

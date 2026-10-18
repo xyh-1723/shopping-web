@@ -255,11 +255,14 @@ public class AssistantService {
             base.addAll(List.of("库存预警与补货建议", "全站经营概览", "按用户名查询订单", "检索内部运营文档"));
         }
         if (actor.isMerchant()) {
-            // 商家是「经营决策方」而不是店员。本次只写它此刻真的做得到的事——
-            // 知识库检索会命中内部运营文档（见 KnowledgeService 的 isOperatingSide 判定）。
-            // 退款审批相关的能力等 MerchantTools 与 refund 表落地（T13b / T14）后再补：
-            // 现在列上去、工具却不存在，就是让模型对买家许空诺。
+            // 商家是「经营决策方」而不是店员。清单只写它此刻真的做得到的事——
+            // 知识库检索会命中内部运营文档（见 KnowledgeService 的 isOperatingSide 判定），
+            // 退款审批由 MerchantTools 提供（T13b）。反过来，店员的发货 / 改价 / 改库存
+            // 不在这里：列上去就是一句兑现不了的承诺。
             base.add("检索内部运营文档（供应商与经营口径）");
+            base.add("查询待审批的退款队列");
+            base.add("批准退款申请（立即放款给买家）");
+            base.add("驳回退款申请");
         }
         return List.copyOf(base);
     }
