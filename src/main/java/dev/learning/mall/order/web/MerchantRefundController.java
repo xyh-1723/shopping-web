@@ -28,6 +28,11 @@ import org.springframework.web.bind.annotation.RestController;
  * <p><b>为空的请求体要容忍</b>：前端「直接点批准/驳回」时可以不发 body，
  * 那不代表审批意见是空字符串——{@code note} 为 {@code null} 与 {@code ""} 在
  * 落库时被归一化成同一个值（没有理由），但在 API 上不必强迫调用方多传一个字段。
+ *
+ * <p><b>「容忍」必须写在 {@code @RequestBody(required = false)} 上，光在方法体里判
+ * {@code request == null} 没有用</b>：{@code @RequestBody} 默认 {@code required = true}，
+ * Spring 会在 controller 方法体执行<b>之前</b>就返回 400，那段 null 分支永远走不到——
+ * 注释与实现说的是两回事，而只有注释的那一半是错的那一半。
  */
 @RestController
 @RequestMapping("/api/refunds")
@@ -60,7 +65,7 @@ public class MerchantRefundController {
      */
     @PostMapping("/{refundId}/approve")
     public RefundView approve(@PathVariable String refundId, Principal principal,
-            @Valid @RequestBody DecisionRequest request) {
+            @Valid @RequestBody(required = false) DecisionRequest request) {
         return refunds.approve(refundId, principal.getName(),
                 request == null ? null : request.note());
     }
@@ -68,7 +73,7 @@ public class MerchantRefundController {
     /** 驳回：本次申请到此为止，不放款、不动库存。 */
     @PostMapping("/{refundId}/reject")
     public RefundView reject(@PathVariable String refundId, Principal principal,
-            @Valid @RequestBody DecisionRequest request) {
+            @Valid @RequestBody(required = false) DecisionRequest request) {
         return refunds.reject(refundId, principal.getName(),
                 request == null ? null : request.note());
     }
