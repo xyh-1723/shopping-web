@@ -36,7 +36,9 @@ public class PaymentTools {
     @Tool("为当前用户的一笔待支付订单发起支付确认。注意：这只是创建待确认请求，不会扣款；"
             + "系统会在页面向用户本人展示确认卡片，用户点击「确认支付」后才会真正执行。"
             + "当用户想支付/付款/结算某个订单时使用。参数：orderId 订单号（可先用 myOrders 查询获得）；"
-            + "method 支付方式，DEMO_CARD=模拟银行卡，DEMO_WALLET=模拟钱包，缺省 DEMO_CARD。"
+            + "method 支付方式，DEMO_CARD=模拟银行卡，DEMO_WALLET=模拟钱包，缺省 DEMO_WALLET。"
+            + "注意：只有 DEMO_WALLET 会真的从用户钱包里扣款，余额不足时用户确认后会提示余额不足；"
+            + "DEMO_CARD 不扣任何钱，将来也就没有可以退回的落点，除非用户明确要求，不要主动选它。"
             + "返回待确认请求 JSON。在用户确认之前，绝不要声称支付已完成。")
     public String requestPayment(@ToolMemoryId String username, String orderId, String method) {
         if (orderId == null || orderId.isBlank()) {

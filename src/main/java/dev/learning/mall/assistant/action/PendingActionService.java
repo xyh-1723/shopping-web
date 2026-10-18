@@ -139,7 +139,11 @@ public class PendingActionService {
      * 归属与状态在这里校验一次，确认执行时订单模块还会再校验一次（纵深防御）。
      */
     public PendingActionView requestOrderPayment(String username, String orderId, String method) {
-        String m = (method == null || method.isBlank()) ? "DEMO_CARD" : method.strip().toUpperCase(Locale.ROOT);
+        // 缺省支付方式 = DEMO_WALLET（2026-10-18 拍板，钱包方案 §6.5）。
+        // 理由是它没有商量余地：助手代下的单如果默认走银行卡，退款时钱没有真实落点，
+        // 「退款终于把钱退回买家」这句话在助手这条占大头的路径上就永远不成立。
+        // 把默认值做成可配（§6.2 的 default-payment-method）留给后续任务，这里只改缺省。
+        String m = (method == null || method.isBlank()) ? "DEMO_WALLET" : method.strip().toUpperCase(Locale.ROOT);
         if (!payments.methods().contains(m)) {
             throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_PAYMENT",
                     "不支持的模拟支付方式：" + m + "（可选：" + String.join("/", payments.methods()) + "）");

@@ -92,8 +92,10 @@ public class OrderTransactions implements OrderCancellation {
             return orders.view(row);
         }
         if (!row.status().equals("PENDING")) throw notPayable(row);
-        // 仅本地无副作用的模拟策略。真实支付必须移出长事务，并使用支付单/回调幂等。
-        String receipt = gateway.pay(id, row.total());
+        // ⚠ 这一步不再是无副作用的模拟：DEMO_WALLET 通道会真的从买家钱包里扣钱。
+        // username 必须一起传进去——钱包得知道扣的是谁的钱，而订单行已在上面校验过归属，
+        // 于是往下走的所有副作用都建立在「这笔钱确实是这个用户的」这个前提上。
+        String receipt = gateway.pay(new PayRequest(id, user, row.total()));
         // 带条件的更新：真被支付成功的只有一次。理论上行锁已经串行化了这里，
         // 但「谁改成了 PAID 谁负责」这条规则不该依赖调用方记得加锁。
         // 支付时刻与关单时刻同一个形状：由 Clock 注入，退款窗口、对账才有确定的起点。
