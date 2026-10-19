@@ -26,6 +26,8 @@ jobs:
         run: |
           npm ci
           npm run test:voice
+      - name: 前端货架渲染上限测试
+        run: npm run test:render-limit
 
   # 第二道：真实模型端到端评测 + 自动化红队。
   # 需要仓库配置 DEEPSEEK_API_KEY secret；未配置时整组步骤跳过（verify 仍然是硬门槛）。

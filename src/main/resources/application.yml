@@ -7,6 +7,14 @@ server:
       cookie:
         http-only: true
         same-site: lax
+  # 响应压缩。开它的理由不是风格，是实测数字：商品从 6 件扩到 500 件后，
+  # GET /api/products 的响应体从 985 字节涨到 112,493 字节（114 倍），而耗时几乎没变
+  # （4.4ms）——瓶颈在字节，不在 CPU。JSON 的重复字段名极适合 gzip，这条路上一路口子都开着。
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/html,text/css,text/plain,application/javascript,text/javascript,image/svg+xml
+    # 小于 1KB 的响应压了也省不了几个字节，反而白付两次 CPU。
+    min-response-size: 1024
 spring:
   application:
     name: learning-mall
