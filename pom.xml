@@ -52,5 +52,19 @@
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-test</artifactId><scope>test</scope></dependency>
     <dependency><groupId>org.springframework.security</groupId><artifactId>spring-security-test</artifactId><scope>test</scope></dependency>
   </dependencies>
-  <build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build>
+  <build><plugins>
+    <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin>
+    <!-- 基准测试（*BenchmarkTest）默认不进全量回归：它产出的是数字，不是红绿，
+         让它参与构建只会让「构建时间」随机器抖动。需要时单跑，-Dtest 会覆盖这里的 excludes：
+         mvn -o test -Dtest=CatalogScaleBenchmarkTest -DfailIfNoTests=false -->
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId>
+      <artifactId>maven-surefire-plugin</artifactId>
+      <configuration>
+        <excludes>
+          <exclude>**/*BenchmarkTest.java</exclude>
+        </excludes>
+      </configuration>
+    </plugin>
+  </plugins></build>
 </project>
