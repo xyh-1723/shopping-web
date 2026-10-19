@@ -34,6 +34,9 @@ public class StaffTools {
 
     private static final String DENIED_NOTICE = "当前账号没有店员权限，无法查询经营数据或其他用户的订单。";
 
+    /** 单次库存告警最多列出几件：按库存升序取最紧张的一批，够店员排一次补货。 */
+    private static final int MAX_ALERTS = 20;
+
     private final ProductCatalog catalog;
     private final OrderInsights insights;
     private final AssistantActors actors;
@@ -49,7 +52,9 @@ public class StaffTools {
         this.json = json;
     }
 
-    @Tool("店员专属：列出库存低于阈值（默认 10 件）的商品与补货建议。只有店员账号可调用。返回 JSON 数组。")
+    @Tool("店员专属：列出库存低于阈值（默认 10 件）的商品与补货建议，按库存从少到多最多列出 20 件，"
+            + "并用 total 字段给出低库存商品的真实总数（total 大于列出的条数时说明还有更多）。"
+            + "只有店员账号可调用。返回 JSON 对象：{total, items}。")
     public String inventoryAlerts(@ToolMemoryId String username, Double threshold) {
         if (denied(username, "inventoryAlerts")) return denial();
         double limit = threshold == null || threshold <= 0 ? 10 : threshold;
@@ -57,16 +62,20 @@ public class StaffTools {
                 .filter(p -> p.stock() < limit)
                 .sorted(Comparator.comparingInt(ProductView::stock))
                 .toList();
-        ArrayNode array = json.createArrayNode();
-        for (ProductView p : low) {
+        ObjectNode result = json.createObjectNode();
+        // total 必须放在最前面：结果超出 4000 字符被 harness 裁剪时，模型至少先看到总数。
+        // 只给截断后的 20 件而不给总数，店员会以为「补完这 20 件就没事了」。
+        result.put("total", low.size());
+        ArrayNode items = result.putArray("items");
+        for (ProductView p : low.stream().limit(MAX_ALERTS).toList()) {
             ObjectNode node = json.createObjectNode();
             node.put("id", p.id());
             node.put("name", p.name());
             node.put("stock", p.stock());
             node.put("suggestion", p.stock() == 0 ? "已售罄，建议优先补货" : "库存偏低，建议补货");
-            array.add(node);
+            items.add(node);
         }
-        return array.toString();
+        return result.toString();
     }
 
     @Tool("店员专属：查看全站经营概览——订单总数、各状态数量、已支付金额与销量前三的商品。只有店员账号可调用。")

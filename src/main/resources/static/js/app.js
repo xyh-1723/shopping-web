@@ -121,6 +121,10 @@ async function loadProducts() {
   renderProducts();
   renderCart();
 }
+// 单次渲染的卡片上限。实测 506 件商品一次性 innerHTML 会拼出 324,863 字节的 DOM 字符串；
+// 而搜索框每次 input 事件都会把整个货架重建一遍——那等于每敲一个字符就重排 32 万字节。
+// 超出上限的不再渲染，改为一句提示，让用户用分类或搜索自己收窄范围。
+const RENDER_LIMIT = 60;
 function renderProducts() {
   const search = $("#search").value.trim().toLowerCase();
   const visible = products.filter(
@@ -128,14 +132,22 @@ function renderProducts() {
       (category === "全部" || p.category === category) &&
       `${p.name}${p.description}`.toLowerCase().includes(search),
   );
+  // 这里必须是筛选后的真实总数，不是 RENDER_LIMIT：否则用户会以为店里只有 60 件。
   $("#product-count").textContent = visible.length;
+  const shown = visible.slice(0, RENDER_LIMIT);
+  const cards = shown
+    .map(
+      (p) =>
+        `<article class="product-card"><a class="product-link" href="/product/${p.id}"><div class="product-image" data-category="${esc(p.category)}"><span class="product-tag">${esc(p.category)}</span><img src="/art/${esc(p.illustration)}.svg" alt="${esc(p.name)}" loading="lazy"></div></a><div class="product-info"><h3><a class="product-link" href="/product/${p.id}">${esc(p.name)}</a></h3><p>${esc(p.description)}</p><div class="product-bottom"><div><div class="price"><small>¥</small>${Number(p.price).toFixed(2)}</div><div class="stock">${p.stock > 0 ? `现货 ${p.stock} 件` : "暂时售罄"}</div></div><button class="add-button" data-add="${p.id}" aria-label="将${esc(p.name)}加入购物车" ${p.stock === 0 ? "disabled" : ""}>+</button></div></div></article>`,
+    )
+    .join("");
+  const hidden = visible.length - shown.length;
+  const more =
+    hidden > 0
+      ? `<p class="empty">还有 ${hidden} 件未显示，用分类或搜索缩小范围。</p>`
+      : "";
   $("#products").innerHTML =
-    visible
-      .map(
-        (p) =>
-          `<article class="product-card"><a class="product-link" href="/product/${p.id}"><div class="product-image" data-category="${esc(p.category)}"><span class="product-tag">${esc(p.category)}</span><img src="/art/${esc(p.illustration)}.svg" alt="${esc(p.name)}" loading="lazy"></div></a><div class="product-info"><h3><a class="product-link" href="/product/${p.id}">${esc(p.name)}</a></h3><p>${esc(p.description)}</p><div class="product-bottom"><div><div class="price"><small>¥</small>${Number(p.price).toFixed(2)}</div><div class="stock">${p.stock > 0 ? `现货 ${p.stock} 件` : "暂时售罄"}</div></div><button class="add-button" data-add="${p.id}" aria-label="将${esc(p.name)}加入购物车" ${p.stock === 0 ? "disabled" : ""}>+</button></div></div></article>`,
-      )
-      .join("") || '<p class="empty">没有找到这件小物，换个关键词试试。</p>';
+    (cards || '<p class="empty">没有找到这件小物，换个关键词试试。</p>') + more;
 }
 // 当前购物袋里的行：登录用户取服务端快照（含实时价与库存），游客取本地暂存。
 function cartEntries() {
