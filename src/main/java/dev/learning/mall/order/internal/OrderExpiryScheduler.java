@@ -35,8 +35,9 @@ class OrderExpiryScheduler {
         try {
             OrderExpiryService.CloseResult result = expiry.closeExpired();
             if (result.closed() > 0 || result.failed() > 0) {
-                log.info("超时关单[{}]：候选 {} 笔，关闭 {} 笔、失败 {} 笔，剩余积压 {} 笔",
-                        source, result.candidates(), result.closed(), result.failed(), result.backlog());
+                log.info("超时关单[{}]：候选 {} 笔，关闭 {} 笔、跳过 {} 笔、失败 {} 笔，剩余积压 {} 笔",
+                        source, result.candidates(), result.closed(), result.skipped(),
+                        result.failed(), result.backlog());
             } else if (result.backlog() > 0) {
                 log.warn("超时关单[{}]：本轮未关闭任何订单，但仍有 {} 笔到期未处理", source, result.backlog());
             }

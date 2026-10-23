@@ -63,6 +63,20 @@ class MerchantToolsTest {
     private static final int PRODUCT_ID = 5;
     private static final int QUANTITY = 2;
 
+    /**
+     * 审批人必须是「{@link #PRODUCT_ID} 这件货所属那家店」的店主。
+     *
+     * <p>V24 之后退款审批判归属：挂在别家店的商品，{@code merchant} 这个账号批不动——
+     * 那正是 {@link MerchantOwnershipTest} 在守的事。所以这里按商品<b>回查</b>店主账号，
+     * 而不是写死 {@code "merchant"}。写死的后果是「换一次商品归属分配公式，
+     * 这批用例就因为归属不匹配而全红」，而那与「工具能不能用」毫无关系——
+     * 那种红只会骗人去改工具，真正的病因却在数据上。
+     *
+     * <p>越权的那几条用例（顾客 / 店员拿商家的工具清单）不受影响，
+     * 它们要的是「某个商家账号」，用哪个都行，仍用 {@link #MERCHANT}。
+     */
+    private String shopOwner;
+
     @Autowired ToolRegistry registry;
     @Autowired AssistantActors actors;
     @Autowired OrderFacade facade;
@@ -80,6 +94,9 @@ class MerchantToolsTest {
         jdbc.sql("DELETE FROM refund").update();
         jdbc.sql("DELETE FROM assistant_audit").update();
         jdbc.sql("UPDATE product SET stock = 10 WHERE id = " + PRODUCT_ID).update();
+        shopOwner = jdbc.sql("SELECT m.owner_username FROM merchant m"
+                        + " JOIN product p ON p.merchant_id = m.id WHERE p.id = :id")
+                .param("id", PRODUCT_ID).query(String.class).single();
     }
 
     @AfterEach
@@ -97,7 +114,7 @@ class MerchantToolsTest {
     @Test
     @DisplayName("① 商家账号能看到退款审批工具，并真的查到待审批队列里的那一笔")
     void merchantSeesPendingQueue() {
-        AssistantActor merchant = actors.resolve(MERCHANT);
+        AssistantActor merchant = actors.resolve(shopOwner);
         String u = buyer("queue");
         OrderView paid = payWithWallet(u);
         RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "不想要了");
@@ -122,7 +139,7 @@ class MerchantToolsTest {
     @Test
     @DisplayName("② 批准真的把钱退回买家钱包（查余额与流水，不只看返回的字符串）")
     void approveDisbursesRealMoney() {
-        AssistantActor merchant = actors.resolve(MERCHANT);
+        AssistantActor merchant = actors.resolve(shopOwner);
         String u = buyer("approve");
         OrderView paid = payWithWallet(u);
         RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "发错货了");
@@ -134,10 +151,10 @@ class MerchantToolsTest {
                 "{\"refundId\":\"" + queued.id() + "\",\"note\":\"核实后同意\"}");
 
         assertThat(out.status()).isEqualTo(ToolRegistry.STATUS_OK);
-        assertThat(out.text()).contains("\"status\":\"REFUNDED\"").contains("\"decidedBy\":\"merchant\"");
+        assertThat(out.text()).contains("\"status\":\"REFUNDED\"").contains("\"decidedBy\":\"" + shopOwner + "\"");
 
         assertThat(refundStatus(queued.id())).isEqualTo(RefundView.STATUS_REFUNDED);
-        assertThat(decidedBy(queued.id())).isEqualTo(MERCHANT);
+        assertThat(decidedBy(queued.id())).isEqualTo(shopOwner);
         assertThat(WalletProbe.balanceCents(jdbc, u))
                 .as("批准即放款：钱必须真的回到买家钱包，而不是只把状态改成 REFUNDED")
                 .isEqualTo(before + expectedCents);
@@ -153,7 +170,7 @@ class MerchantToolsTest {
     @Test
     @DisplayName("③ 驳回不放款、不动库存，且审批意见落库")
     void rejectDisbursesNothing() {
-        AssistantActor merchant = actors.resolve(MERCHANT);
+        AssistantActor merchant = actors.resolve(shopOwner);
         String u = buyer("reject");
         OrderView paid = payWithWallet(u);
         RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "拍错了");

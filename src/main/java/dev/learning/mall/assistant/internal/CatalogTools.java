@@ -4,15 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.learning.mall.catalog.api.ProductCatalog;
+import dev.learning.mall.catalog.api.ProductQuery;
+import dev.learning.mall.catalog.api.ProductSort;
 import dev.learning.mall.catalog.api.ProductView;
 import dev.langchain4j.agent.tool.Tool;
-import java.util.ArrayList;
-import java.util.Comparator;
-import java.util.HashSet;
+import java.math.BigDecimal;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeMap;
 import org.springframework.stereotype.Component;
 
 /**
@@ -24,6 +21,11 @@ import org.springframework.stereotype.Component;
  * 实测 506 件商品时空关键词搜索会产出 27,417 字符，被裁之后模型只看得见
  * <b>按价格升序的前一段</b>——于是「你们有什么」得到的答案永远是「最便宜的那批」。
  * 上限既是省 token，更是保证模型看到的是有代表性的样本而不是价格榜尾。
+ *
+ * <p><b>而且上限必须下推到 SQL</b>：以前这里是先 {@code catalog.list()} 把整个目录
+ * 拉进 Java 再 filter + limit。目录 506 件时无感；按 5 万件算，一次「随便看看」
+ * 就要把 5 万行读出来、建 5 万个对象，然后扔掉 49988 个只为留下 12 件。
+ * 现在筛选、排序、截断都由数据库完成。
  */
 @Component
 public class CatalogTools {
@@ -52,64 +54,35 @@ public class CatalogTools {
         // 「本店最值得展示的就是最便宜的 12 件」——500 件商品下这会让助手变成一个
         // 只会推廉价货的助手，用户问「有什么数码产品」和「有什么好东西」得到的是同一批便宜货。
         boolean browsing = kw.isEmpty() && cat.isEmpty() && maxPrice == null;
-        List<ProductView> filtered = catalog.list().stream()
-                .filter(p -> kw.isEmpty() || (p.name() + p.description()).toLowerCase().contains(kw))
-                .filter(p -> cat.isEmpty() || p.category().equals(cat))
-                .filter(p -> maxPrice == null || p.price().doubleValue() <= maxPrice)
-                .sorted(Comparator.comparing(ProductView::price))
-                .toList();
-        // 有过滤条件时保持原语义：先筛再比价是合理的（用户已经划了范围，比价才有意义）。
         List<ProductView> picked = browsing
-                ? spreadAcrossCategories(filtered)
-                : filtered.stream().limit(MAX_RESULTS).toList();
+                ? catalog.sampleAcrossCategories(PER_CATEGORY, MAX_RESULTS)
+                : search(kw, cat, maxPrice);
         ArrayNode array = json.createArrayNode();
         picked.forEach(p -> array.add(brief(p)));
         return array.toString();
     }
 
     /**
-     * 跨分类均匀取样：每个分类最多贡献 {@link #PER_CATEGORY} 件（分类内部保持价格升序），
-     * 总数不超过 {@link #MAX_RESULTS}。
-     *
-     * <p>为什么是「按名次轮流取」而不是「按分类切段」：分类之间商品数量并不均衡
-     * （数码可能只有 20 件、生活有 300 件），切段会让小分类一件都进不来。
-     * 轮流取保证每个分类都出代表；某个分类不足 4 件时，空出的名额再从其余商品里
-     * 按价格升序补齐，避免总结果数被最小的分类拖少。
-     *
-     * @param sortedByPrice 已按价格升序排好的候选集
+     * 带条件的搜索：有过滤条件时保持「先筛再比价」的原语义——
+     * 用户已经划了范围，在这个范围里比价才有意义。
      */
-    private static List<ProductView> spreadAcrossCategories(List<ProductView> sortedByPrice) {
-        // TreeMap：分类按名称排序，保证同一批商品的取样结果稳定可复现（不随 list() 返回顺序漂移）。
-        Map<String, List<ProductView>> byCategory = new TreeMap<>();
-        for (ProductView p : sortedByPrice) {
-            byCategory.computeIfAbsent(p.category(), k -> new ArrayList<>()).add(p);
-        }
-        List<ProductView> picked = new ArrayList<>();
-        for (int rank = 0; rank < PER_CATEGORY && picked.size() < MAX_RESULTS; rank++) {
-            for (List<ProductView> items : byCategory.values()) {
-                if (picked.size() >= MAX_RESULTS) break;
-                if (rank < items.size()) picked.add(items.get(rank));
-            }
-        }
-        if (picked.size() < MAX_RESULTS) {
-            Set<Long> seen = new HashSet<>();
-            picked.forEach(p -> seen.add(p.id()));
-            for (ProductView p : sortedByPrice) {
-                if (picked.size() >= MAX_RESULTS) break;
-                if (seen.add(p.id())) picked.add(p);
-            }
-        }
-        return List.copyOf(picked);
+    private List<ProductView> search(String keyword, String category, Double maxPrice) {
+        ProductQuery query = new ProductQuery(
+                keyword.isEmpty() ? null : keyword,
+                category.isEmpty() ? null : category,
+                maxPrice == null ? null : BigDecimal.valueOf(maxPrice),
+                false, ProductSort.PRICE_ASC, 0, MAX_RESULTS);
+        return catalog.search(query).items();
     }
 
     @Tool("按场景（如送礼、自用、办公）和预算（元）推荐商品，返回不超过预算的商品 JSON 数组，含 id、name、price、stock、reason。")
     public String recommendByBudget(String scenario, double budget) {
         String scene = scenario == null || scenario.isBlank() ? "日常" : scenario.strip();
-        List<ProductView> candidates = catalog.list().stream()
-                .filter(p -> p.stock() > 0 && p.price().doubleValue() <= budget)
-                .sorted(Comparator.comparing(ProductView::price).reversed())
-                .limit(5)
-                .toList();
+        // 价格降序：预算内挑最贵的，把预算用足（送 100 元的礼不该推 9 块 9 的）。
+        // stock > 0 同样下推到 SQL——推一件售罄的商品给用户，比少推一件糟得多。
+        ProductQuery query = new ProductQuery(null, null, BigDecimal.valueOf(budget),
+                true, ProductSort.PRICE_DESC, 0, 5);
+        List<ProductView> candidates = catalog.search(query).items();
         ArrayNode array = json.createArrayNode();
         for (ProductView p : candidates) {
             ObjectNode node = brief(p);

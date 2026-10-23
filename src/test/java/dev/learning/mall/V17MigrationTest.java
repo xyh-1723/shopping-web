@@ -245,7 +245,7 @@ class V17MigrationTest {
     @Test
     @DisplayName("迁移重放到空库：refund 与它的唯一索引、生成列都在，且不灌任何种子数据")
     void migrationReplaysOnAFreshDatabase() throws SQLException {
-        String url = "jdbc:h2:mem:v17-replay-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1";
+        String url = TestH2.inMemory("v17-replay-" + UUID.randomUUID());
         SimpleDriverDataSource replay = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
         try {
             Flyway.configure().dataSource(replay).locations("classpath:db/migration")
@@ -303,7 +303,7 @@ class V17MigrationTest {
         return jdbc.sql("INSERT INTO assistant_pending_action(id,username,conversation_id,kind,order_id,"
                         + "amount,payment_method,refund_reason_code,refund_reason_text,status,expires_at) "
                         + "VALUES(:id,:user,:conv,:kind,:order,:amount,'DEMO_WALLET',:code,:text,"
-                        + "'PENDING',DATEADD('HOUR',1,CURRENT_TIMESTAMP))")
+                        + "'PENDING',TIMESTAMPADD(HOUR,1,CURRENT_TIMESTAMP))")
                 .param("id", pendingActionId(kind))
                 .param("user", PROBE_USER)
                 .param("conv", PROBE_CONVERSATION)

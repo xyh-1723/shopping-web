@@ -145,7 +145,7 @@ class V19MigrationTest {
     @Test
     @DisplayName("迁移重放到空库：V19 跟在 V18 之后成立，且两侧长度在那里也相等")
     void migrationReplaysOnAFreshDatabase() throws SQLException {
-        String url = "jdbc:h2:mem:v19-replay-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1";
+        String url = TestH2.inMemory("v19-replay-" + UUID.randomUUID());
         SimpleDriverDataSource replay = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
         try {
             Flyway.configure().dataSource(replay).locations("classpath:db/migration")

@@ -72,9 +72,14 @@ public class MemoryStore {
                          double confidence, long ttlDays) {
         // 先 UPDATE 再 INSERT，而不是 MERGE：MERGE 的「按哪组列匹配」依赖底层主键/唯一索引的
         // 具体实现，换个库就可能有细微差别；两条显式语句在哪都一样。同一 key 覆盖而非追加。
+        //
+        // 日期加减统一用 TIMESTAMPADD(DAY, n, ts)，不用 DATEADD()：
+        // DATEADD 是 H2 专有函数，MySQL 上会报 FUNCTION does not exist；而 MySQL 的
+        // DATE_ADD(ts, INTERVAL n DAY) 在 H2 上又不存在。同一个应用要在 H2（测试）和
+        // MySQL（生产）上都跑，只能取交集——TIMESTAMPADD 是实测两边都成立的那个。
         int updated = jdbc.sql("UPDATE assistant_user_memory SET memory_value = :value, source = :source, " +
                         "confidence = :conf, updated_at = CURRENT_TIMESTAMP, " +
-                        "expires_at = DATEADD('DAY', :ttl, CURRENT_TIMESTAMP) " +
+                        "expires_at = TIMESTAMPADD(DAY, :ttl, CURRENT_TIMESTAMP) " +
                         "WHERE username = :user AND memory_key = :key")
                 .param("value", value).param("source", source).param("conf", confidence)
                 .param("ttl", (int) ttlDays)
@@ -83,7 +88,7 @@ public class MemoryStore {
         if (updated > 0) return;
         jdbc.sql("INSERT INTO assistant_user_memory " +
                  "(id, username, memory_key, memory_value, source, confidence, expires_at) " +
-                 "VALUES(:id, :user, :key, :value, :source, :conf, DATEADD('DAY', :ttl, CURRENT_TIMESTAMP))")
+                 "VALUES(:id, :user, :key, :value, :source, :conf, TIMESTAMPADD(DAY, :ttl, CURRENT_TIMESTAMP))")
                 .param("id", UUID.randomUUID().toString())
                 .param("user", username)
                 .param("key", key)

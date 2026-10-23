@@ -11,3 +11,7 @@ artifacts/
 # 凭据文件：不得进版本库
 .deepseek.key
 *.key
+
+# 探针工具的编译产物与依赖清单（tools/ 下的源码要留，产物不留）
+tools/out/
+tools/cp.txt

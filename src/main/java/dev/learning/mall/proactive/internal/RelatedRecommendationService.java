@@ -134,11 +134,15 @@ public class RelatedRecommendationService {
         if (categories.isEmpty()) return;
         List<String> ordered = new ArrayList<>(categories);
         List<Long> seedList = new ArrayList<>(seeds);
+        // LIMIT 必须下推：调用方最多只要 5 件，不带 LIMIT 时这条语句会把「同品类的
+        // 全部有货商品」都读出来（目录 5 万件、某个品类占一半就是 2.5 万行），
+        // 然后在 Java 里扔掉前 5 件之外的一切。
         List<ProductView> candidates = jdbc.sql("""
                         SELECT id, name, description, category, illustration, price, stock FROM product
                         WHERE category IN (:cats) AND stock > 0 AND id NOT IN (:seeds)
-                        ORDER BY price""")
-                .param("cats", ordered).param("seeds", seedList)
+                        ORDER BY price
+                        LIMIT :limit""")
+                .param("cats", ordered).param("seeds", seedList).param("limit", size)
                 .query(ProductView.class).list();
         for (ProductView product : candidates) {
             if (out.size() >= size) return;

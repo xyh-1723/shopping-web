@@ -1,6 +1,17 @@
 spring:
   datasource:
-    url: jdbc:h2:mem:malltest;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
+    # 测试跑 H2，但开 MySQL 兼容模式：迁移脚本按 MySQL 方言写（生产库是 MySQL 8），
+    # 而 MODIFY COLUMN / CHANGE COLUMN 这类 ALTER 语句在 H2 默认模式下是语法错误，
+    # 加了 MODE=MySQL 才被接受。不开这个模式，V13/V19 在测试里直接崩。
+    #
+    # 刻意不加 DATABASE_TO_LOWER=TRUE：加了以后 H2 会把标识符存成小写，
+    # 于是「唯一索引冲突」的报错里索引名也变小写（uq_xxx），而一批测试断言的是
+    # 生产库里那种大写形式（UQ_WALLET_LEDGER_ORDER_REASON）——大小写一改就全红。
+    # 不加它，H2 保持默认的大写标识符，这批断言原样成立。
+    #
+    # 已知残留差异：真 MySQL 的报错里索引名是小写，所以这批断言目前仍然只在 H2 上成立。
+    # 真要做到「测试库 = 生产库」，正确解法是 Testcontainers 起真 MySQL，不是继续调 H2 的模式。
+    url: jdbc:h2:mem:malltest;MODE=MySQL;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=10000
 mall:
   messaging:
     enabled: false
@@ -12,6 +23,10 @@ mall:
   # 让「库存有没有归还」这类断言随执行时序飘。需要时由 OrderExpiryTest 显式打开。
   order:
     auto-close-enabled: false
+    # 测试是单实例：分片总数 1、序号 0，于是每个用例都能看到全部到期订单。
+    # 需要验证分片行为的用例（OrderExpiryShardingTest）在自己的 @SpringBootTest 里覆盖。
+    auto-close-shard-count: 1
+    auto-close-shard-index: 0
     # 自动收货同样默认关闭，且把扫描间隔拉到一小时（FulfillmentScheduler 读的是这里的占位符）：
     # 后台定时扫描会推进正在被断言的订单，让「这一步走到哪了」随执行时序飘。
     # 需要时由 FulfillmentFlowTest 显式打开开关并直接调用扫描器。

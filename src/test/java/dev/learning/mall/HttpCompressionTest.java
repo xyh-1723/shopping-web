@@ -36,8 +36,20 @@ class HttpCompressionTest {
 
     private static final long FIXTURE_ID_BASE = 900_000L;
 
-    /** 造多少件商品：6 件种子数据的响应体只有 985 字节，低于 1024 的压缩门槛。 */
+    /** 填充商品的统一前缀：既是被搜索的关键词，也让插进来的行一眼认得出是谁造的。 */
+    private static final String SEED_KEYWORD = "低库存商品";
+
+    /** 造多少件商品：响应体必须稳定超过 1024 字节的压缩门槛，不依赖目录里原有几件。 */
     private static final int SEED_COUNT = 40;
+
+    /**
+     * 带筛选与显式 size 的列表 URL。
+     *
+     * <p>为什么必须带 {@code keyword}：列表接口现在是分页的，默认只回前 24 件，
+     * 而基准商品是 {@code id >= 900001} 现插的——不筛就根本不在第一页里，
+     * 于是「压缩生效」这条断言会退化成在压一个跟本测试无关的首页。
+     */
+    private static final String PRODUCTS_URL = "/api/products?keyword=" + SEED_KEYWORD + "&size=100";
 
     @LocalServerPort int port;
 
@@ -53,7 +65,7 @@ class HttpCompressionTest {
     void productsApiIsGzippedOnRealContainer() throws Exception {
         seed(SEED_COUNT);
 
-        HttpResponse<byte[]> gzipped = send("/api/products", true);
+        HttpResponse<byte[]> gzipped = send(PRODUCTS_URL, true);
 
         assertThat(gzipped.statusCode()).isEqualTo(200);
         assertThat(gzipped.headers().firstValue("Content-Encoding").orElse(""))
@@ -67,8 +79,8 @@ class HttpCompressionTest {
         assertThat(raw[1]).isEqualTo((byte) 0x8b);
 
         String json = gunzip(raw);
-        assertThat(json).startsWith("[");
-        assertThat(json).contains("云朵马克杯").contains("低库存商品");
+        assertThat(json).startsWith("{");
+        assertThat(json).contains("低库存商品").contains("\"total\"");
     }
 
     @Test
@@ -76,8 +88,8 @@ class HttpCompressionTest {
     void gzippedBodyIsMuchSmallerThanPlain() throws Exception {
         seed(SEED_COUNT);
 
-        int plain = send("/api/products", false).body().length;
-        int compressed = send("/api/products", true).body().length;
+        int plain = send(PRODUCTS_URL, false).body().length;
+        int compressed = send(PRODUCTS_URL, true).body().length;
 
         assertThat(plain).as("响应体必须先超过 1024 字节的压缩门槛")
                 .isGreaterThan(1024);
@@ -85,7 +97,7 @@ class HttpCompressionTest {
                 .isLessThan(plain / 2);
 
         // 顺手把量级打出来，方便人眼核对（断言不依赖它）。
-        System.out.printf("  /api/products: 原始 %d 字节 → gzip %d 字节（%.1f%%）%n",
+        System.out.printf("  /api/products?size=100: 原始 %d 字节 → gzip %d 字节（%.1f%%）%n",
                 plain, compressed, 100.0 * compressed / plain);
     }
 
@@ -94,10 +106,10 @@ class HttpCompressionTest {
     void noAcceptEncodingMeansNoCompression() throws Exception {
         seed(SEED_COUNT);
 
-        HttpResponse<byte[]> plain = send("/api/products", false);
+        HttpResponse<byte[]> plain = send(PRODUCTS_URL, false);
 
         assertThat(plain.headers().firstValue("Content-Encoding")).as("未声明 Accept-Encoding 时不应压缩").isEmpty();
-        assertThat(new String(plain.body(), StandardCharsets.UTF_8)).startsWith("[");
+        assertThat(new String(plain.body(), StandardCharsets.UTF_8)).startsWith("{");
     }
 
     private HttpResponse<byte[]> send(String path, boolean gzip) throws Exception {
@@ -119,10 +131,13 @@ class HttpCompressionTest {
 
     private void seed(int count) {
         for (int i = 0; i < count; i++) {
-            jdbc.sql("INSERT INTO product(id, name, description, category, illustration, price, stock) "
-                            + "VALUES(:id,:n,:d,'生活','box',:p,:s)")
+            jdbc.sql("INSERT INTO product(id, name, description, category, illustration, price, stock,"
+                            + " merchant_id) VALUES(:id,:n,:d,'生活','box',:p,:s,1)")
+                    // merchant_id 在 V24 之后是 NOT NULL 且没有默认值：造商品必须回答「谁的货」。
+                    // 这些填充商品与归属无关（用例验证的是分页 / 压缩 / 告警上限），
+                    // 一律挂 1 号店——写死一个确定的答案，比在这里再发明一套分配规则好。
                     .param("id", FIXTURE_ID_BASE + i + 1)
-                    .param("n", "低库存商品" + i)
+                    .param("n", SEED_KEYWORD + i)
                     .param("d", "用于把响应体撑过压缩门槛，以便验证 gzip 真的生效。")
                     .param("p", 9.9)
                     .param("s", 50)

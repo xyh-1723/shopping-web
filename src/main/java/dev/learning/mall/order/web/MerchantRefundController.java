@@ -52,10 +52,17 @@ public class MerchantRefundController {
         this.refunds = refunds;
     }
 
-    /** 待审批队列，先申请的排在前面。 */
+    /**
+     * 待审批队列，先申请的排在前面。
+     *
+     * <p><b>可见范围由 {@code RefundService} 按账号推导</b>（店员全站 / 商家自己那家店），
+     * 这里不做任何过滤、也不接受任何「要不要过滤」的参数：
+     * URL 级已经把这条限制在 {@code STAFF} 与 {@code MERCHANT}，
+     * 剩下的那一层判断只有一处实现，新入口没有东西可以传错。
+     */
     @GetMapping("/pending")
-    public List<RefundView> pendingQueue() {
-        return refunds.pendingQueue(QUEUE_LIMIT);
+    public List<RefundView> pendingQueue(Principal principal) {
+        return refunds.pendingQueueFor(principal.getName(), QUEUE_LIMIT);
     }
 
     /**

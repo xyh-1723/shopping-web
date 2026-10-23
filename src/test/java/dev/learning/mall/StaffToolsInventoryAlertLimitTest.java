@@ -106,8 +106,11 @@ class StaffToolsInventoryAlertLimitTest {
     /** 造 count 件低库存商品：库存按 0..9 循环，全部低于默认阈值 10。 */
     private void seedLowStock(int count) {
         for (int i = 0; i < count; i++) {
-            jdbc.sql("INSERT INTO product(id, name, description, category, illustration, price, stock) "
-                            + "VALUES(:id,:n,:d,'生活','box',:p,:s)")
+            jdbc.sql("INSERT INTO product(id, name, description, category, illustration, price, stock,"
+                            + " merchant_id) VALUES(:id,:n,:d,'生活','box',:p,:s,1)")
+                    // merchant_id 在 V24 之后是 NOT NULL 且没有默认值：造商品必须回答「谁的货」。
+                    // 这些填充商品与归属无关（用例验证的是分页 / 压缩 / 告警上限），
+                    // 一律挂 1 号店——写死一个确定的答案，比在这里再发明一套分配规则好。
                     .param("id", FIXTURE_ID_BASE + i + 1)
                     .param("n", "低库存商品" + i)
                     .param("d", "用于验证库存告警的明细上限与 total 字段。")

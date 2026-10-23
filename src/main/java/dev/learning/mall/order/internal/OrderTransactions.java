@@ -129,7 +129,10 @@ public class OrderTransactions implements OrderCancellation {
     @Transactional
     @Observed("close-expired-order")
     public boolean closeExpired(String id, LocalDateTime now) {
-        OrderRow row = orders.lock(id).orElse(null);
+        // 用带 SKIP LOCKED 的那一份：多实例部署时，另一个实例（或正在付款的买家）
+        // 可能正锁着这行。等锁没有意义——等到了也只是发现状态已经变了，
+        // 不如立刻放手，下一轮再来。分片已经让这种情况很少见，这是第二道保险。
+        OrderRow row = orders.lockForClose(id).orElse(null);
         if (row == null || !row.status().equals("PENDING")) return false;
         // 二次确认截止时间：从取出候选到拿到行锁之间，可能已经有人付了款或改了订单。
         // 到期与否由服务端判定，调用方传进来的时间只用来界定「这一轮扫到哪」。

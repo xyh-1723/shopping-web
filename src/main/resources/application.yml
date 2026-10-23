@@ -21,11 +21,25 @@ spring:
   # 密钥不进版本库：本地把 mall.assistant.deepseek.api-key 写进 .deepseek.key（已在 .gitignore 中），
   # 或者直接用环境变量 DEEPSEEK_API_KEY 覆盖。这也顺带演示了「凭据不落代码」这条基本要求。
   config:
-    import: optional:file:.deepseek.key[.properties]
+    # 数据库口令与模型密钥走同一套路子：不进版本库，落在 .db.key（*.key 已被 .gitignore 忽略）。
+    # 文件格式就是 properties 一行：DB_PASSWORD=...
+    import: optional:file:.deepseek.key[.properties],optional:file:.db.key[.properties]
   datasource:
-    url: jdbc:h2:file:./data/mall;DB_CLOSE_ON_EXIT=FALSE;LOCK_TIMEOUT=10000
-    username: sa
+    # 主库从 H2 文件库换成 MySQL 8，理由是后面要做的几件事都依赖 InnoDB 的行级语义：
+    #   - `SELECT ... FOR UPDATE SKIP LOCKED`：多实例并行扫超时单的取模分片要靠它跳过彼此已锁的行
+    #   - 库存分桶/三段库存：热点行锁争抢的前提是「行锁」，H2 2.x 的文件锁是整库级
+    #   - 多实例部署：H2 文件库默认单进程独占，第二个实例根本起不来
+    # H2 只保留给测试跑（见 application-test.yml，开 MODE=MySQL 兼容模式）。
+    # URL 里刻意不写 characterEncoding=utf8mb4：那是照着 MySQL 服务端参数想当然写出来的值，
+    # Connector/J 会直接抛 "Unsupported character encoding 'utf8mb4'"（Java 侧没有这个字符集名），
+    # 结果是应用连库就崩。Connector/J 8/9 默认就是 utf8mb4，不用指定。
+    # serverTimezone 必须显式给：不给会拿服务器时区反推，跨时区部署时 TIMESTAMP 会整体偏移。
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/mall?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true}
+    username: ${DB_USERNAME:root}
     password: ${DB_PASSWORD:}
+    # 不写 driver-class-name：写死会让测试里 H2 的 URL 也被塞给 MySQL 驱动
+    # （报 "Driver com.mysql.cj.jdbc.Driver claims to not accept jdbcUrl, jdbc:h2:mem:..."）。
+    # 交给 Spring Boot 按 URL 前缀推断，两个库各走各的。
     hikari:
       maximum-pool-size: 12
   thymeleaf:
@@ -146,6 +160,12 @@ mall:
     auto-close-scan-delay-ms: 60000
     auto-close-initial-delay-ms: 20000
     auto-close-max-per-scan: 200 # 单轮上限。到期订单被关掉后即离开结果集，不存在队尾饥饿
+    # 超时关单的分片：多实例部署时，每个实例只扫自己那一份到期订单。
+    # 两个值都来自环境变量——镜像是同一份，实例之间唯一的区别就是启动参数，
+    # 所以「我是第几个」只能由外部注入（docker-compose / k8s 里给每个副本设不同的 SHARD_INDEX）。
+    # 单实例部署保持默认值即可：1 个分片、序号 0，语义与分片前完全一致。
+    auto-close-shard-count: ${SHARD_COUNT:1}
+    auto-close-shard-index: ${SHARD_INDEX:0}
     auto-receive-days: 10        # 发货后多少天自动确认收货；在发货那一刻算成 auto_receive_at 落库，
                                  # 之后改这个数字不会让在路上的订单一起跳变
     auto-receive-enabled: true   # 关掉它 = 回到「买家不点收货就永远在途」的旧行为，仅用于排障
