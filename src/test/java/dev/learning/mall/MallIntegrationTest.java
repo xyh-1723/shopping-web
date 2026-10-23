@@ -121,7 +121,10 @@ class MallIntegrationTest {
 
     @Test void publicPagesAndProtectedEndpoints() throws Exception {
         mvc.perform(get("/")).andExpect(status().isOk()).andExpect(content().string(org.hamcrest.Matchers.containsString("小小商城")));
-        mvc.perform(get("/api/products")).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(6));
+        // 目录规模以 V20 落盘后的 506 件为准（V2 六件 + V20 追加五百件）。
+        // 这里守的是「列表接口能把目录完整渲染出来」，与商品到底几件无关，
+        // 因此规模变化后应当跟着改数字，而不是删掉这条断言。
+        mvc.perform(get("/api/products")).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(506));
         mvc.perform(get("/api/orders")).andExpect(status().isUnauthorized());
         mvc.perform(get("/actuator/health")).andExpect(status().isOk());
         mvc.perform(post("/api/orders").with(user("student")).contentType("application/json").content("{}"))

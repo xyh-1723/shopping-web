@@ -349,8 +349,11 @@ class ProactiveServiceTest {
         assertThat(related).isNotEmpty();
         assertThat(related).extracting(RelatedProduct::id).doesNotContain(2L);
         assertThat(related.get(0).reason()).contains("品类");
-        // 文具类目下除了 2 还有 6（专注计时器）。
-        assertThat(related).extracting(RelatedProduct::id).contains(6L);
+        // 旧断言写的是「结果里必须含 6 号」——那是因为目录只有 6 件时，文具类目下
+        // 除了袋里的 2 号只剩 6 号一件。V20 把目录扩到 506 件后文具类目有一百多件，
+        // 同类目候选不再固定到某一件，所以这里改成断言「推荐结果全都来自文具类目」：
+        // 守的仍然是「退回同类目、且不含袋中商品」这件事，与目录规模无关。
+        assertThat(related).allSatisfy(p -> assertThat(p.category()).isEqualTo("文具"));
     }
 
     @Test
