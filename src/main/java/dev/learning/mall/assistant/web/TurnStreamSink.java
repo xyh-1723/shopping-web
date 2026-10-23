@@ -63,7 +63,10 @@ final class TurnStreamSink implements TurnListener {
             Map.entry("rejectRefund", "正在驳回退款"));
 
     private final SseEmitter emitter;
+    /** 这条通道是否已经作废（连接断开 / 序列化失败 / 轮次已收尾）。作废后所有事件静默丢弃。 */
     private final AtomicBoolean closed = new AtomicBoolean();
+    /** 这一次异步请求是否已经画上句号。只许发生一次，与 {@link #closed} 刻意分成两个标记。 */
+    private final AtomicBoolean ended = new AtomicBoolean();
 
     TurnStreamSink(SseEmitter emitter) {
         this.emitter = emitter;
@@ -115,7 +118,12 @@ final class TurnStreamSink implements TurnListener {
         emit("guard", Map.of("reason", reason));
     }
 
-    /** 推一个事件。连接已断或轮次已结束时静默丢弃——迟到的进度不该制造错误。 */
+    /**
+     * 推一个事件。连接已断或轮次已结束时静默丢弃——迟到的进度不该制造错误。
+     *
+     * <p><b>「吞掉异常」不等于「之后什么都不用做」</b>：这里只负责让「这一条推不出去」
+     * 不上升成整轮失败，收尾的 {@link #close()} 仍然必须把响应画上句号——理由见那里。
+     */
     void emit(String event, Object data) {
         if (closed.get()) return;
         try {
@@ -131,10 +139,36 @@ final class TurnStreamSink implements TurnListener {
         closed.set(true);
     }
 
-    /** 正常收尾：发完最后一条事件后结束响应。幂等，且不会在已关闭的通道上重复 complete。 */
+    /**
+     * 收尾：结束这一次响应。<b>幂等</b>，且<b>通道已经废了也必须结束</b>。
+     *
+     * <p><b>为什么「通道已废」也必须 {@code complete()}</b>（这一条是后来补的，之前这里
+     * 是「已关闭就什么都不做」）：{@link #emit} 一旦失败就会置上「已关闭」。若收尾时见到
+     * 这个标记就跳过 {@code complete()}，<b>这一次异步请求就再也没有人给它画句号</b>——
+     * 它只能一直挂着，直到容器把这个异步请求掐断（本项目的超时是 harness 墙钟预算 +20 秒）。
+     * 挂住的这段时间里，{@code SseEmitter}、已经排队的事件与被刷开的输出缓冲区都留在内存里，
+     * 而前端早在第一帧失败时就已经不再等待了。
+     *
+     * <p>更麻烦的是它的<b>外观</b>：这种失败长得完全像「机器慢 / 超时给少了」——测试里表现为
+     * {@code getAsyncResult(...)} 整整干等到超时，而不是简明地点出一个错。按错的方向去修，
+     * 「把超时从 10 秒加到 30 秒」几乎必然是第一个被想到的动作，但那只是把窗口挪大。
+     *
+     * <p>{@code SseEmitter.complete()} 自身是<b>幂等</b>的：重复调用只是再走一次
+     * {@code handler.complete()}，没有任何断言，所以「之前已有 emit 失败」与「正常收尾」
+     * 在这里走同一条路即可。残余异常一并收住——一条已经在出错的通道，不该再把异常泄到
+     * 轮次之外的日志里。
+     */
     void close() {
-        if (closed.compareAndSet(false, true)) {
+        closed.set(true);
+        // 「已经画过句号」与「这条通道废了」是两件事，因此各用一个标记：
+        // 前者保证幂等，后者保证之后迟到的事件被静默丢弃。
+        if (!ended.compareAndSet(false, true)) {
+            return;
+        }
+        try {
             emitter.complete();
+        } catch (Exception ignored) {
+            // 客户端断开、响应已提交完毕：同上，都归为「这条通道没了」。
         }
     }
 

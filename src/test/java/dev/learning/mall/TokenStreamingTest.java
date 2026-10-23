@@ -25,9 +25,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -57,10 +60,17 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   <li>增量里一旦出现泄密内容，立刻停止推送并作废已推出的内容；</li>
  *   <li>流式与同步<b>返回同一个东西</b>：落库内容、输出守卫的处置都不因分块而变化。</li>
  * </ol>
+ *
+ * <p><b>本类的流式端点用例由 {@link DeferredTurnExecutor} 驱动</b>：助手线程池那条提交被
+ * 扣住，等请求线程把 filter 链走完（安全响应头这时才写完）再由用例显式放行。这么做的原因
+ * 见 {@link DeferredTurnExecutor}——它绕开的是 <b>MockMvc 的响应对象不支持并发写</b>
+ * 这一个测试侧固有属性，被测的流式协议语义一点没动。
  */
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
+// 仅为覆盖 assistantTurnExecutor 同名 Bean 而打开，作用域仅限本测试类的上下文。
+@TestPropertySource(properties = "spring.main.allow-bean-definition-overriding=true")
 class TokenStreamingTest {
 
     @Autowired AssistantService service;
@@ -69,6 +79,8 @@ class TokenStreamingTest {
     @Autowired AssistantRateLimiter rateLimiter;
     @Autowired JdbcClient jdbc;
     @Autowired MockMvc mvc;
+    /** 被攒下的轮次由用例自己放行；见 {@link DeferredTurnExecutor}。 */
+    @Autowired DeferredTurnExecutor turnExecutor;
 
     private static final String ALICE = "student";
 
@@ -88,6 +100,7 @@ class TokenStreamingTest {
 
     @AfterEach
     void cleanup() {
+        turnExecutor.discardPending();
         properties.setEnabled(false);
         properties.getZhipu().setApiKey("");
         ReflectionTestUtils.setField(service, "chatModel", Optional.empty());
@@ -116,6 +129,24 @@ class TokenStreamingTest {
         assertThat(AuditTrail.residueFor(trailJdbc, seenConversationIds))
                 .as("本类建过的会话在 assistant_audit 里必须一行不剩：残迹会一路带到下一个测试类")
                 .isZero();
+    }
+
+    /**
+     * 本测试类替换 {@code assistantTurnExecutor} 的那个 Bean——扣下来的轮次由用例自己放行，
+     * 理由见 {@link DeferredTurnExecutor}。
+     */
+    @TestConfiguration
+    static class DeferredTurnExecutorConfig {
+
+        /**
+         * 返回类型必须是 {@link DeferredTurnExecutor}（继承
+         * {@link org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor}）：
+         * {@code AssistantAsyncConfig.configureAsyncSupport} 按名字取这个 Bean 并强转。
+         */
+        @Bean(name = "assistantTurnExecutor")
+        DeferredTurnExecutor assistantTurnExecutor(AssistantProperties config) {
+            return new DeferredTurnExecutor(config.getConcurrency());
+        }
     }
 
     /** 建一个会话并登记它的号：审计行挂在会话号上，只有它当得起收窄的键。 */
@@ -244,6 +275,10 @@ class TokenStreamingTest {
                         .content("{\"message\":\"帮我查一下\"}"))
                 .andExpect(request().asyncStarted())
                 .andReturn();
+        // 先让请求线程把 filter 链走完，再放行 worker。理由见 DeferredTurnExecutor 的说明。
+        assertThat(turnExecutor.drainAndAwait())
+                .as("助手端点必须把轮次交给助手线程池执行，且一次请求只提交一个轮次")
+                .isEqualTo(1);
         pending.getAsyncResult(10_000);
         mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders
                         .asyncDispatch(pending))
