@@ -103,8 +103,13 @@ class V14MigrationTest {
         // 前提：每个有货的商品都已经有一条流水（迁移完成时建立，或后来被补过账）。
         // 先确认前提，再断言「回填影响 0 行」——不看前提直接断言 0 行，
         // 一旦有商品确实缺基线，这条测试会红得莫名其妙。
+        //
+        // 范围限定在 id 1..6：V14 比 V20 早，V20 追加的那 500 件商品在 V14 执行的那一刻
+        // 还不存在，自然不会有 V14 的期初流水。也就是说「V20 之后 500 件有库存却无期初流水」
+        // 是这次扩容暴露出来的真实缺口（对账恒等式只在不区分新旧商品时才成立），
+        // 已单独上报；本用例守的是 V14 自身的回填幂等，因此只看 V14 时代就存在的商品。
         long missingBaseline = jdbc.sql("SELECT COUNT(*) FROM product p"
-                        + " WHERE p.stock > 0 AND NOT EXISTS"
+                        + " WHERE p.id BETWEEN 1 AND 6 AND p.stock > 0 AND NOT EXISTS"
                         + " (SELECT 1 FROM stock_ledger l WHERE l.product_id = p.id)")
                 .query(Long.class).single();
         assertThat(missingBaseline).isZero();
@@ -113,7 +118,7 @@ class V14MigrationTest {
         int rows = jdbc.sql("INSERT INTO stock_ledger(product_id, delta, stock_before, stock_after, reason, actor)"
                         + " SELECT p.id, p.stock, 0, p.stock, 'RESTOCK', 'flyway-v14'"
                         + "   FROM product p"
-                        + "  WHERE p.stock > 0"
+                        + "  WHERE p.id BETWEEN 1 AND 6 AND p.stock > 0"
                         + "    AND NOT EXISTS (SELECT 1 FROM stock_ledger l WHERE l.product_id = p.id)")
                 .update();
         assertThat(rows).as("重复回放迁移不能重复建账，否则对账恒等式会被打破").isZero();

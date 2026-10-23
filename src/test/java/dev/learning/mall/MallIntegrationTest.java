@@ -121,7 +121,15 @@ class MallIntegrationTest {
 
     @Test void publicPagesAndProtectedEndpoints() throws Exception {
         mvc.perform(get("/")).andExpect(status().isOk()).andExpect(content().string(org.hamcrest.Matchers.containsString("小小商城")));
-        mvc.perform(get("/api/products")).andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(6));
+        // 目录规模刻意不写死。原先这里写的是 6（当时只有 6 件商品），V20 把它扩到 506 件之后变红；
+        // 改成写死 506 只是把同一个脆弱前提换了个数字——下次商品再变它还会红，而且红得毫无信息量
+        // （它没告诉任何人什么东西坏了，只说数量变了）。
+        // 这条真正要守的是「列表接口把整个目录都返回出来了」，所以拿库里的真实件数去比对：
+        // 这个断言在 6 件和 506 件下都成立，也都不会因为规模变化而失效。
+        int productCount = count("product");
+        mvc.perform(get("/api/products"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(productCount));
         mvc.perform(get("/api/orders")).andExpect(status().isUnauthorized());
         mvc.perform(get("/actuator/health")).andExpect(status().isOk());
         mvc.perform(post("/api/orders").with(user("student")).contentType("application/json").content("{}"))

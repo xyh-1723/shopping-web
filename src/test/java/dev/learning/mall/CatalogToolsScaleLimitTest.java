@@ -112,15 +112,27 @@ class CatalogToolsScaleLimitTest {
         return node;
     }
 
-    /** brief() 不含 category 字段，所以用商品名前缀反查分类。 */
-    private static Set<String> categoriesOf(JsonNode array) {
+    /**
+     * 按返回的 id 去查<b>真实</b>分类。
+     *
+     * <p>这里原本是这样写的：拿商品名前缀去猜分类（{@code name.startsWith("数码")}）。
+     * 在只有本类 fixture 商品时成立——fixture 的名字就叫「数码商品0」；商品目录扩到 506 件之后
+     * <b>彻底失效</b>：真实商品叫「青柠磁吸专注计时器」，名字里根本没有分类，于是它被判成未知分类，
+     * 断言跟着变红。<b>红的不是被测代码，是这条私有方法的脆弱假设。</b>
+     *
+     * <p>取 id 回查数据库才是稳定的：它不依赖任何关于商品名的约定，也不受目录里有几件、名字怎么起的影响。
+     */
+    private Set<String> categoriesOf(JsonNode array) {
         Set<String> cats = new LinkedHashSet<>();
-        array.forEach(node -> {
-            String name = node.get("name").asText();
-            for (String c : CATEGORIES) {
-                if (name.startsWith(c)) cats.add(c);
-            }
-        });
+        Set<Long> ids = new LinkedHashSet<>();
+        array.forEach(node -> ids.add(node.get("id").asLong()));
+        for (Long id : ids) {
+            jdbc.sql("SELECT category FROM product WHERE id = :id")
+                    .param("id", id)
+                    .query(String.class)
+                    .optional()
+                    .ifPresent(cats::add);
+        }
         return cats;
     }
 

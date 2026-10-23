@@ -205,13 +205,17 @@ class PriceChangeGuardTest {
             jdbc.sql("DELETE FROM " + table).update();
         }
         jdbc.sql("DELETE FROM stock_ledger WHERE reason = 'RESERVE' OR reason = 'RELEASE'").update();
+        // 只重置本用例真正用到的 1..6 号。CASE 没有 ELSE 分支，一旦不限定范围，
+        // V20 追加的 7..506 号价格会被写成 NULL，直接违反 product.price 的 NOT NULL。
+        // （顺带也避免把全套目录的库存统一刷成 50，污染别人对库存分布的断言。）
         jdbc.sql("""
                         UPDATE product
                            SET stock = 50,
                                price = CASE id
                                    WHEN 1 THEN 39.00 WHEN 2 THEN 29.00 WHEN 3 THEN 89.00
                                    WHEN 4 THEN 49.00 WHEN 5 THEN 199.00 WHEN 6 THEN 59.00
-                               END""").update();
+                               END
+                         WHERE id BETWEEN 1 AND 6""").update();
     }
 
     private int count(String table) {
