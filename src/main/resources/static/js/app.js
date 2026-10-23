@@ -31,9 +31,85 @@ try {
 
 let products = [],
   category = "全部",
+  keyword = "",
   currentView = "shop",
   busy = false,
   toastTimer;
+// —— 分页：一次只向服务端要一页 ——
+// 以前这里是一次 GET /api/products 把整个目录拉回来（实测 1006 件时 227KB，
+// 线性外推 5 万件是 11MB），然后在本机 filter。现在筛选与翻页都交给服务端，
+// 浏览器只持有当前这一页。PAGE_SIZE 与后端 ProductQuery.DEFAULT_SIZE 对齐。
+const PAGE_SIZE = 24;
+let page = 0,
+  totalPages = 1,
+  total = 0;
+function productsUrl() {
+  const query = new URLSearchParams({ page, size: PAGE_SIZE });
+  // 前端不再自己拼 category=全部：那是"不限"的意思，不是真的有个叫"全部"的分类。
+  if (category !== "全部") query.set("category", category);
+  if (keyword) query.set("keyword", keyword);
+  return `/api/products?${query}`;
+}
+// —— 已见商品缓存 ——
+// 分页之后浏览器只持有当前这一页，但购物袋里的商品可能是上一页的。
+// 没有这份跨页累积的缓存，「翻到第二页后购物袋少了一半商品」这种问题
+// 不会报错，只是静静地少显示几行——属于最难查的那一类。
+const knownProducts = new Map();
+function rememberProducts(list) {
+  list.forEach((p) => knownProducts.set(p.id, p));
+}
+const findProduct = (id) => knownProducts.get(Number(id));
+
+async function loadProductPage() {
+  const view = await api(productsUrl());
+  products = view.items || [];
+  total = view.total || 0;
+  totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // 目录缩小（或筛选后命中变少）时页码会越界，拉回来一页空的结果很难查。
+  if (page > totalPages - 1) {
+    page = totalPages - 1;
+    return loadProductPage();
+  }
+  rememberProducts(products);
+  renderProducts();
+  renderPager();
+}
+async function loadProducts() {
+  await loadProductPage();
+  await loadCart();
+  renderCart();
+}
+// 翻页与筛选共用的入口：改条件就回到第一页，只翻页才保留页码。
+function resetPage() {
+  page = 0;
+}
+function renderPager() {
+  const box = $("#pager");
+  if (!box) return;
+  if (total <= PAGE_SIZE) {
+    box.innerHTML = "";
+    return;
+  }
+  const prev = `<button class="button outline small" data-page="${page - 1}" ${page === 0 ? "disabled" : ""}>上一页</button>`;
+  const next = `<button class="button outline small" data-page="${page + 1}" ${page >= totalPages - 1 ? "disabled" : ""}>下一页</button>`;
+  box.innerHTML = `${prev}<span class="subtle">第 ${page + 1} / ${totalPages} 页</span>${next}`;
+}
+// 搜索防抖：每敲一个字符就打一次服务端，等于把一次输入变成十几次查询。
+// 250ms 是"打完这个词"和"等得有点久"之间的折中。
+let searchTimer;
+function onSearchInput() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(async () => {
+    keyword = $("#search").value.trim();
+    resetPage();
+    // 只刷货架：搜索不会改变购物袋，顺带重拉袋子只会多打两次接口。
+    try {
+      await loadProductPage();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  }, 250);
+}
 function saveGuestCart() {
   localStorage.setItem(GUEST_CART_KEY, JSON.stringify(guestCart));
 }
@@ -115,50 +191,46 @@ async function api(path, options = {}) {
   if (!response.ok) throw new Error(data?.message || "请求失败，请稍后重试");
   return data;
 }
-async function loadProducts() {
-  products = await api("/api/products");
-  await loadCart();
-  renderProducts();
-  renderCart();
-}
 // 单次渲染的卡片上限。实测 506 件商品一次性 innerHTML 会拼出 324,863 字节的 DOM 字符串；
 // 而搜索框每次 input 事件都会把整个货架重建一遍——那等于每敲一个字符就重排 32 万字节。
 // 超出上限的不再渲染，改为一句提示，让用户用分类或搜索自己收窄范围。
-const RENDER_LIMIT = 60;
 function renderProducts() {
-  const search = $("#search").value.trim().toLowerCase();
-  const visible = products.filter(
-    (p) =>
-      (category === "全部" || p.category === category) &&
-      `${p.name}${p.description}`.toLowerCase().includes(search),
-  );
-  // 这里必须是筛选后的真实总数，不是 RENDER_LIMIT：否则用户会以为店里只有 60 件。
-  $("#product-count").textContent = visible.length;
-  const shown = visible.slice(0, RENDER_LIMIT);
-  const cards = shown
+  // 筛选与搜索都已经在服务端做完（keyword / category 随分页请求一起发出去），
+  // 这里只负责渲染这一页。以前是在浏览器里 filter 整个目录——目录 5 万件时
+  // 每敲一个字符都要遍历 5 万条，还会把不在本页的商品一起算进「共 N 件」。
+  $("#product-count").textContent = total;
+  const cards = products
     .map(
       (p) =>
         `<article class="product-card"><a class="product-link" href="/product/${p.id}"><div class="product-image" data-category="${esc(p.category)}"><span class="product-tag">${esc(p.category)}</span><img src="/art/${esc(p.illustration)}.svg" alt="${esc(p.name)}" loading="lazy"></div></a><div class="product-info"><h3><a class="product-link" href="/product/${p.id}">${esc(p.name)}</a></h3><p>${esc(p.description)}</p><div class="product-bottom"><div><div class="price"><small>¥</small>${Number(p.price).toFixed(2)}</div><div class="stock">${p.stock > 0 ? `现货 ${p.stock} 件` : "暂时售罄"}</div></div><button class="add-button" data-add="${p.id}" aria-label="将${esc(p.name)}加入购物车" ${p.stock === 0 ? "disabled" : ""}>+</button></div></div></article>`,
     )
     .join("");
-  const hidden = visible.length - shown.length;
-  const more =
-    hidden > 0
-      ? `<p class="empty">还有 ${hidden} 件未显示，用分类或搜索缩小范围。</p>`
-      : "";
   $("#products").innerHTML =
-    (cards || '<p class="empty">没有找到这件小物，换个关键词试试。</p>') + more;
+    cards || '<p class="empty">没有找到这件小物，换个关键词试试。</p>';
 }
 // 当前购物袋里的行：登录用户取服务端快照（含实时价与库存），游客取本地暂存。
 function cartEntries() {
-  const find = (id) => products.find((p) => p.id === Number(id));
   if (user && cartView)
-    return cartView.items
-      .map((item) => ({ ...item, product: find(item.productId) }))
-      .filter((row) => row.product);
+    // 服务端返回的每一行业务字段齐全（名称、图、单价、库存），
+    // 不依赖「这件商品正好在当前这一页」——分页之后这个前提不再成立。
+    return cartView.items.map((item) => ({
+      productId: item.productId,
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      subtotal: item.subtotal,
+      stock: item.stock,
+      available: item.available,
+      product: {
+        id: item.productId,
+        name: item.name,
+        illustration: item.illustration,
+        price: item.unitPrice,
+        stock: item.stock,
+      },
+    }));
   return Object.entries(guestCart)
     .map(([id, quantity]) => {
-      const product = find(id);
+      const product = findProduct(id);
       if (!product) return null;
       return {
         productId: product.id,
@@ -201,7 +273,12 @@ function renderCart() {
 }
 async function adjust(id, delta) {
   if (busy) return;
-  const p = products.find((p) => p.id === Number(id));
+  // 优先查缓存（跨页累积）；袋内行在缓存里查不到时，服务端快照本身也带着实时库存。
+  const p =
+    findProduct(id) ||
+    (user && cartView
+      ? cartView.items.find((item) => item.productId === Number(id))
+      : null);
   if (!p) return;
   const current = user && cartView
     ? cartView.items.find((item) => item.productId === Number(id))?.quantity || 0
@@ -212,7 +289,7 @@ async function adjust(id, delta) {
   await setQuantity(Number(id), next);
 }
 async function addToCart(id) {
-  const p = products.find((p) => p.id === Number(id));
+  const p = findProduct(id);
   if (!p || p.stock === 0) return;
   if (!user) {
     guestCart[id] = Math.min((guestCart[id] || 0) + 1, Math.min(p.stock, 99));
@@ -554,9 +631,16 @@ document.addEventListener("click", async (event) => {
     document
       .querySelectorAll("[data-category].chip")
       .forEach((el) => el.classList.toggle("active", el === button));
-    renderProducts();
+    resetPage();
+    // 分类筛选以前是在浏览器里做的（点一下 chip 只是重排本机数组）；
+    // 现在它是服务端条件，必须真的回去要一次数据，否则按钮点了没反应。
+    await loadProductPage();
   }
   if (button.dataset.add) await addToCart(Number(button.dataset.add));
+  if (button.dataset.page) {
+    page = Number(button.dataset.page);
+    await loadProductPage();
+  }
   if (button.dataset.adjust)
     await adjust(Number(button.dataset.adjust), Number(button.dataset.delta));
   if (button.dataset.remove && !busy) await setQuantity(Number(button.dataset.remove), 0);
@@ -577,7 +661,9 @@ document.addEventListener("click", async (event) => {
     }
   }
 });
-$("#search").addEventListener("input", renderProducts);
+// 搜索走服务端（keyword 随分页请求发出），所以这里不能直接重排本机数组；
+// 250ms 防抖把"打完一个词"合并成一次请求，而不是每敲一个字符打一次服务端。
+$("#search").addEventListener("input", onSearchInput);
 $("#checkout").addEventListener("click", checkout);
 $("#replay").addEventListener("click", replay);
 let refreshing = false;

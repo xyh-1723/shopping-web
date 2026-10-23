@@ -15,7 +15,7 @@ import static org.assertj.core.api.Assertions.*;
 class RestartPersistenceTest {
     @TempDir Path directory;
     @Test void pendingEventsAndIdempotencySurviveRestart() {
-        String url = "jdbc:h2:file:" + directory.resolve("mall").toAbsolutePath().toString().replace('\\','/') + ";DB_CLOSE_ON_EXIT=FALSE";
+        String url = TestH2.file(directory.resolve("mall").toAbsolutePath().toString().replace('\\','/'));
         var request = new CreateOrderRequest(List.of(new CreateOrderRequest.Line(1,1)));
         String orderId, eventId;
         try (var first = start(url)) {

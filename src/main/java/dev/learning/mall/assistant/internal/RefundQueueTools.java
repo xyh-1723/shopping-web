@@ -61,7 +61,10 @@ public class RefundQueueTools {
             + "店员与商家账号可调用；队列里的退款只能由商家批准或驳回。返回 JSON 数组；队列为空时返回空数组。")
     public String pendingRefundQueue(@ToolMemoryId String username) {
         if (denied(username, "pendingRefundQueue")) return denial();
-        List<RefundView> queue = refunds.pendingQueue(QUEUE_LIMIT);
+        // 可见范围按调用者推导：店员看全站，商家只看自己那家店。
+        // 这里刻意不传任何「只要自己店的」开关——那种参数每多一个入口就多一次传错的机会，
+        // 而传错的后果就是某个商家看到了别家店的退款。
+        List<RefundView> queue = refunds.pendingQueueFor(username, QUEUE_LIMIT);
         ArrayNode array = json.createArrayNode();
         for (RefundView r : queue) {
             ObjectNode node = json.createObjectNode();

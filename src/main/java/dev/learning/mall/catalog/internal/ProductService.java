@@ -30,7 +30,16 @@ public class ProductService implements ProductCatalog {
         this.events = events;
     }
 
-    public List<ProductView> list() { return repository.list(); }
+    public ProductPage search(ProductQuery query) { return repository.search(query); }
+
+    public List<ProductView> sampleAcrossCategories(int perCategory, int limit) {
+        return repository.sampleAcrossCategories(perCategory, limit);
+    }
+
+    public LowStockReport lowStock(double threshold, int limit) {
+        return repository.lowStock(threshold, limit);
+    }
+
     public ProductView get(long id) {
         return repository.find(id).orElseThrow(() -> BusinessException.notFound("商品不存在"));
     }

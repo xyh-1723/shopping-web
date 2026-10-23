@@ -42,9 +42,51 @@ class RefundRepository {
         return jdbc.sql(SELECT + "WHERE id = :id").param("id", id).query(RefundRow.class).optional();
     }
 
+    /**
+     * 全站待审批队列（店员 / 运营视角）。
+     *
+     * <p><b>调用方必须先确认这个人是店员</b>：商家看队列要走 {@link #pendingQueueOf}。
+     * 这里没有第二道过滤，是因为「全站」本身就是它的语义——
+     * 把两种可见范围塞进一个方法、再用一个开关切换，等于让「谁能看多少」这件事
+     * 分散在调用点各处，那正是加商家表之前的状态（只不过那时是「谁都能看全部」）。
+     */
     List<RefundRow> pendingQueue(int limit) {
         return jdbc.sql(SELECT + "WHERE status = 'PENDING_APPROVAL' ORDER BY created_at, id LIMIT :limit")
                 .param("limit", limit).query(RefundRow.class).list();
+    }
+
+    /**
+     * 某一家店的待审批队列：只含<b>订单里带了这家店商品</b>的退款。
+     *
+     * <p>判据落在 {@code order_item.merchant_id} 上，而不是 {@code refund} 上的某个商家列——
+     * 退款挂在订单上，而「这笔订单涉及哪些店」只有明细知道。
+     * 用 {@code EXISTS} 而不是 {@code JOIN}：一笔订单里这家店可能有三行明细，
+     * JOIN 会把同一笔退款重复三遍，队列上出现三条一模一样的待办，点哪条都是同一笔。
+     */
+    List<RefundRow> pendingQueueOf(long merchantId, int limit) {
+        return jdbc.sql(SELECT + "r WHERE r.status = 'PENDING_APPROVAL'"
+                        + " AND EXISTS (SELECT 1 FROM order_item i"
+                        + "              WHERE i.order_id = r.order_id AND i.merchant_id = :m)"
+                        + " ORDER BY r.created_at, r.id LIMIT :limit")
+                .param("m", merchantId).param("limit", limit).query(RefundRow.class).list();
+    }
+
+    /**
+     * 这笔订单里有没有这家店的商品——<b>审批的归属校验</b>就落在这里。
+     *
+     * <p>它挡的是「商家 A 批准了只属于商家 B 的退款」：在加这张表之前，
+     * 任何 MERCHANT 账号都能批准任何退款，因为根本没有「你的店」这个概念可查。
+     *
+     * <p><b>已知边界（3b 之前）</b>：一笔跨店订单（同时含 A 与 B 的商品）在当下是<b>一个</b>订单、
+     * 一笔退款，所以 A 与 B 都能看到并批准它，且批准会退掉整单金额。
+     * 这不是漏判，是「退款挂在订单上」这个当前结构的直接后果；
+     * 修法是把退款挂到子订单上（阶段 3b），不是在这里按金额再切一刀——
+     * 那样会同时出现「退款」与「部分退款」两套语义。
+     */
+    boolean involvesMerchant(String orderId, long merchantId) {
+        Long n = jdbc.sql("SELECT COUNT(*) FROM order_item WHERE order_id = :o AND merchant_id = :m")
+                .param("o", orderId).param("m", merchantId).query(Long.class).single();
+        return n != null && n > 0;
     }
 
     List<RefundRow> ofUser(String username) {

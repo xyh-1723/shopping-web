@@ -1,6 +1,7 @@
 package dev.learning.mall.order.internal;
 
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.AssertTrue;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Min;
 import java.math.BigDecimal;
@@ -41,6 +42,23 @@ public class OrderProperties {
      */
     @Min(1)
     private int autoCloseMaxPerScan = 200;
+    /**
+     * 超时关单的<b>分片总数</b>：部署了几个实例，就填几。
+     *
+     * <p>单实例部署时保持 1，语义与改动前完全一致（所有订单归这一个实例扫）。
+     * 多实例时每个实例配同一个 {@code shardCount}、不同的 {@code shardIndex}，
+     * 于是同一批到期的订单只会被其中一个实例挑中，而不是 N 个实例抢同一把行锁。
+     */
+    @Min(1)
+    private int autoCloseShardCount = 1;
+    /**
+     * 本实例负责第几个分片，取值范围 {@code [0, shardCount)}。
+     *
+     * <p>这两个值来自环境变量而不是硬编码：镜像是同一份，实例之间唯一的区别
+     * 就是启动参数，所以「我是第几个」只能由外部注入。
+     */
+    @Min(0)
+    private int autoCloseShardIndex = 0;
 
     /**
      * 发货后多少天自动确认收货。
@@ -95,6 +113,22 @@ public class OrderProperties {
     public void setAutoCloseInitialDelayMs(long autoCloseInitialDelayMs) { this.autoCloseInitialDelayMs = autoCloseInitialDelayMs; }
     public int getAutoCloseMaxPerScan() { return autoCloseMaxPerScan; }
     public void setAutoCloseMaxPerScan(int autoCloseMaxPerScan) { this.autoCloseMaxPerScan = autoCloseMaxPerScan; }
+    /**
+     * 分片序号必须落在 {@code [0, shardCount)}。
+     *
+     * <p>这条必须<b>在启动时炸</b>而不是运行时静默：序号越界的实例每一轮都会扫到 0 笔订单，
+     * 于是它既不报错、也不关单、积压量还是 0——一个「看起来一切正常、其实什么都没干」的实例，
+     * 是所有失败里最难被发现的那种。宁可起不来。
+     */
+    @AssertTrue(message = "mall.order.auto-close-shard-index 必须小于 auto-close-shard-count，否则本实例扫不到任何订单")
+    public boolean isShardIndexInRange() {
+        return autoCloseShardIndex < autoCloseShardCount;
+    }
+
+    public int getAutoCloseShardCount() { return autoCloseShardCount; }
+    public void setAutoCloseShardCount(int autoCloseShardCount) { this.autoCloseShardCount = autoCloseShardCount; }
+    public int getAutoCloseShardIndex() { return autoCloseShardIndex; }
+    public void setAutoCloseShardIndex(int autoCloseShardIndex) { this.autoCloseShardIndex = autoCloseShardIndex; }
     public int getAutoReceiveDays() { return autoReceiveDays; }
     public void setAutoReceiveDays(int autoReceiveDays) { this.autoReceiveDays = autoReceiveDays; }
     public boolean isAutoReceiveEnabled() { return autoReceiveEnabled; }

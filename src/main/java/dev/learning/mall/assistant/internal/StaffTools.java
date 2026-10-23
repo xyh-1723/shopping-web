@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import dev.learning.mall.assistant.security.AssistantActors;
 import dev.learning.mall.assistant.security.AssistantAudit;
+import dev.learning.mall.catalog.api.LowStockReport;
 import dev.learning.mall.catalog.api.ProductCatalog;
 import dev.learning.mall.catalog.api.ProductView;
 import dev.learning.mall.order.api.OrderInsights;
@@ -58,16 +59,15 @@ public class StaffTools {
     public String inventoryAlerts(@ToolMemoryId String username, Double threshold) {
         if (denied(username, "inventoryAlerts")) return denial();
         double limit = threshold == null || threshold <= 0 ? 10 : threshold;
-        List<ProductView> low = catalog.list().stream()
-                .filter(p -> p.stock() < limit)
-                .sorted(Comparator.comparingInt(ProductView::stock))
-                .toList();
+        // 总数与明细一次拿齐：以前这里是 catalog.list() 全表拉进 Java 再 filter，
+        // 目录 5 万件时"看一眼缺货"就要读 5 万行，而真正要的只有最紧张的 20 件。
+        LowStockReport low = catalog.lowStock(limit, MAX_ALERTS);
         ObjectNode result = json.createObjectNode();
         // total 必须放在最前面：结果超出 4000 字符被 harness 裁剪时，模型至少先看到总数。
         // 只给截断后的 20 件而不给总数，店员会以为「补完这 20 件就没事了」。
-        result.put("total", low.size());
+        result.put("total", low.total());
         ArrayNode items = result.putArray("items");
-        for (ProductView p : low.stream().limit(MAX_ALERTS).toList()) {
+        for (ProductView p : low.items()) {
             ObjectNode node = json.createObjectNode();
             node.put("id", p.id());
             node.put("name", p.name());

@@ -16,7 +16,14 @@ ALTER TABLE mall_order ADD CONSTRAINT ck_order_close_reason
 
 -- 存量 PENDING 订单必须回填，否则它们永远进不了扫描窗口——迁移里最容易漏的一步。
 -- 用 created_at + 默认 15 分钟回推：这些订单的下单时刻是事实，按当时承诺的时限补上。
-UPDATE mall_order SET expires_at = DATEADD('MINUTE', 15, created_at)
+--
+-- 日期加减是两种库方言差异最大的地方，这里踩过一次坑，写法是实测出来的交集：
+--   DATEADD('MINUTE', 15, ts)  —— H2 专有，MySQL 报 FUNCTION does not exist
+--   DATE_ADD(ts, INTERVAL 15 MINUTE) —— MySQL 专有，H2 报 Function not found
+--   ts + INTERVAL 15 MINUTE    —— MySQL 可以，H2 直接语法错误（要写成 INTERVAL '15'）
+--   TIMESTAMPADD(MINUTE, 15, ts) —— 两边都成立（H2 2.3 / MySQL 8.0 实测）
+-- 所以本脚本统一用 TIMESTAMPADD，凡是「时间 + N」都别换回上面三种写法。
+UPDATE mall_order SET expires_at = TIMESTAMPADD(MINUTE, 15, created_at)
  WHERE status = 'PENDING' AND expires_at IS NULL;
 
 -- 扫描按「状态 + 截止时间」过滤。没有这个索引，定时任务就是每分钟一次全表扫。

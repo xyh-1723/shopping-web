@@ -24,4 +24,6 @@
 --   又一次单边改动时失效（两侧一起改成 600 会让它假红），而「相等」守住的
 --   是这个不变量本身：留痕必须接得住站内信接得住的任何一条文案。
 
-ALTER TABLE notification_delivery ALTER COLUMN content SET DATA TYPE VARCHAR(500);
+-- 同 V13：MySQL 只有 MODIFY，且必须重复完整类型。NOT NULL 一并写上——
+-- MODIFY 是整体替换列定义，漏掉它就会把 V17 的 NOT NULL 悄悄改成可空。
+ALTER TABLE notification_delivery MODIFY COLUMN content VARCHAR(500) NOT NULL;

@@ -50,9 +50,24 @@ public interface OrderRefunds {
      */
     RefundView approve(String refundId, String merchant, String note);
 
-    /** 商家驳回一笔待审批退款。驳回是终点，不放款、不动库存。 */
+    /**
+     * 商家驳回一笔待审批退款。驳回是终点，不放款、不动库存。
+     *
+     * <p>与 {@link #approve} 一样受归属约束：只有订单里含自己店铺商品的商家才能驳回。
+     */
     RefundView reject(String refundId, String merchant, String note);
 
-    /** 待审批队列，按申请时间正序（先来先判）。 */
-    List<RefundView> pendingQueue(int limit);
+    /**
+     * 待审批队列，按申请时间正序（先来先判）。
+     *
+     * <p><b>可见范围由 {@code viewer} 这个账号自己推导，不由调用方指定</b>：
+     * 店员看全站，商家只看自己那家店，两者都不是则 403。
+     * 让它成为一个「调用方传 limit 就返回全站」的方法，是加商家表之前的形状——
+     * 商家会因此看到别家店的退款，而「看得到」通常紧接着就是「批得了」。
+     *
+     * @param viewer 查看者账号（店员或商家）
+     * @throws dev.learning.mall.common.BusinessException
+     *         {@code REFUND_QUEUE_FORBIDDEN}（403）既不是店员也不是商家
+     */
+    List<RefundView> pendingQueueFor(String viewer, int limit);
 }

@@ -158,7 +158,7 @@ class V16MigrationTest {
     @Test
     @DisplayName("迁移不 seeding 初始额度：全新库重放到 V16 之后 wallet 表零行")
     void migrationSeedsNoOpeningBalance() throws SQLException {
-        String url = "jdbc:h2:mem:v16-replay-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1";
+        String url = TestH2.inMemory("v16-replay-" + UUID.randomUUID());
         SimpleDriverDataSource replay = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
         try {
             Flyway.configure().dataSource(replay).locations("classpath:db/migration")

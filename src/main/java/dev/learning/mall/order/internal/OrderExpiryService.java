@@ -56,14 +56,22 @@ public class OrderExpiryService {
     public CloseResult closeExpired() {
         // 开关关闭时没有发生扫描，积压量是「没测」而不是「为零」——所以这里刻意不更新 Gauge，
         // 让它保留上一轮的值。写 0 会把「排障中、没人扫」伪装成「一切正常」。
-        if (!properties.isAutoCloseEnabled()) return new CloseResult(0, 0, 0, 0);
+        if (!properties.isAutoCloseEnabled()) return new CloseResult(0, 0, 0, 0, 0);
         LocalDateTime now = LocalDateTime.now(clock);
-        List<String> ids = orders.expiredPending(now, properties.getAutoCloseMaxPerScan());
+        int shardCount = properties.getAutoCloseShardCount();
+        int shardIndex = properties.getAutoCloseShardIndex();
+        List<String> ids = orders.expiredPending(now, properties.getAutoCloseMaxPerScan(), shardCount, shardIndex);
         int closed = 0;
+        int skipped = 0;
         int failed = 0;
         for (String id : ids) {
             try {
-                if (transactions.closeExpired(id, now)) closed++;
+                // 三态而不是二态：关掉了 / 跳过（不是待支付，或行被别人锁着）/ 抛异常。
+                // 「跳过」必须单独计——它意味着这一笔既没成功也没出错，
+                // 混进 closed 会虚报战果，混进 failed 会让日志里全是假警报。
+                boolean done = transactions.closeExpired(id, now);
+                if (done) closed++;
+                else skipped++;
             } catch (Exception e) {
                 // 单笔失败只影响这一笔；它下一轮还会被选中，不会静默消失。
                 failed++;
@@ -71,13 +79,18 @@ public class OrderExpiryService {
             }
         }
         // 关完再看一次剩余量：持续不为零说明扫描跟不上到期的速度（要么调大单轮上限，要么调密间隔）。
-        int backlog = ids.isEmpty() ? 0 : orders.expiredBacklog(now);
+        int backlog = ids.isEmpty() ? 0 : orders.expiredBacklog(now, shardCount, shardIndex);
         // 积压量持续不为零是「扫描跟不上到期速度」的唯一信号，但它只活在返回值里就没人看得见。
         // 写进 Gauge 才能被问出来：现在是 0 还是 200，是两件完全不同的事。
         lastBacklog.set(backlog);
-        return new CloseResult(ids.size(), closed, failed, backlog);
+        return new CloseResult(ids.size(), closed, skipped, failed, backlog);
     }
 
-    /** 一轮扫描的结果，供测试断言与运营观测。 */
-    public record CloseResult(int candidates, int closed, int failed, int backlog) {}
+    /**
+     * 一轮扫描的结果，供测试断言与运营观测。
+     *
+     * @param skipped 挑中了但没关掉的笔数：已不是待支付，或行锁被别人持有（{@code SKIP LOCKED}）。
+     *                它不是失败——这一笔下一轮还会被选中，只是本轮不归我处理。
+     */
+    public record CloseResult(int candidates, int closed, int skipped, int failed, int backlog) {}
 }

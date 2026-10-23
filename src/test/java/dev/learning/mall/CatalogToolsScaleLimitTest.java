@@ -146,8 +146,11 @@ class CatalogToolsScaleLimitTest {
         for (int c = 0; c < CATEGORIES.length; c++) {
             for (int i = 0; i < PER_CATEGORY; i++) {
                 long id = FIXTURE_ID_BASE + (long) c * PER_CATEGORY + i + 1;
-                jdbc.sql("INSERT INTO product(id, name, description, category, illustration, price, stock) "
-                                + "VALUES(:id,:n,:d,:c,'box',:p,:s)")
+                jdbc.sql("INSERT INTO product(id, name, description, category, illustration, price, stock,"
+                                + " merchant_id) VALUES(:id,:n,:d,:c,'box',:p,:s,1)")
+                    // merchant_id 在 V24 之后是 NOT NULL 且没有默认值：造商品必须回答「谁的货」。
+                    // 这些填充商品与归属无关（用例验证的是分页 / 压缩 / 告警上限），
+                    // 一律挂 1 号店——写死一个确定的答案，比在这里再发明一套分配规则好。
                         .param("id", id)
                         .param("n", CATEGORIES[c] + "商品" + i)
                         .param("d", "扩容填充商品，用于验证搜索结果上限与跨分类取样。")

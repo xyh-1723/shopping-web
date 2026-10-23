@@ -164,7 +164,7 @@ class V15MigrationTest {
     @Test
     @DisplayName("迁移内的语句顺序：先回填再加约束（空库灌一笔 PAID 后完整重放 V15 必须成功）")
     void scriptAddsConstraintsAfterBackfill() throws SQLException {
-        String url = "jdbc:h2:mem:v15-replay-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1";
+        String url = TestH2.inMemory("v15-replay-" + UUID.randomUUID());
         SimpleDriverDataSource replay = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
         try {
             // 第一步：把库停在 V14。那一刻 mall_order 还没有 paid_at 这一列，

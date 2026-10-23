@@ -1,11 +1,16 @@
 package dev.learning.mall.config;
 
+import dev.learning.mall.merchant.api.MerchantDirectory;
+import dev.learning.mall.merchant.api.MerchantView;
+import java.util.ArrayList;
+import java.util.List;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.core.userdetails.User;
+import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -19,19 +24,41 @@ public class SecurityConfig {
     @Bean
     PasswordEncoder passwordEncoder() { return new BCryptPasswordEncoder(); }
 
+    /**
+     * 账号清单。
+     *
+     * <p><b>商家账号是从 {@code merchant} 表生成的，不是在这里手写出来的</b>（阶段 3a）。
+     * 手写 N 个商家账号的做法有个致命问题：账号与「哪一家店」之间没有绑定，
+     * 于是每一个商家账号都天然拥有全部店铺的数据——造 200 个账号等于造 200 个越权账号。
+     * 现在 {@code merchant.owner_username} 是唯一绑定点，账号由表推导，
+     * 「有多少家店就有多少个商家账号」这句话才成立。
+     *
+     * <p><b>同一份口令只做一次 BCrypt</b>：BCrypt(cost=10) 一次约 60-100ms，
+     * 200 个商家账号各编码一遍会把启动时间拖到十几秒，而它们用的是同一个配置值。
+     * {@code User.withUsername(...).password(...)} 收的本来就是<b>已编码</b>的哈希串，
+     * 复用同一个串不改变任何语义，只省掉 199 次毫无意义的重复计算。
+     */
     @Bean
-    UserDetailsService users(PasswordEncoder encoder,
+    UserDetailsService users(PasswordEncoder encoder, MerchantDirectory merchants,
                              @Value("${mall.demo-password}") String password,
                              @Value("${mall.merchant-password}") String merchantPassword) {
-        return new InMemoryUserDetailsManager(
-                User.withUsername("student").password(encoder.encode(password)).roles("USER").build(),
-                User.withUsername("classmate").password(encoder.encode(password)).roles("USER").build(),
-                // 店员账号：演示「同一助手、不同权限」。密码与演示账号共用一份 ${mall.demo-password}。
-                User.withUsername("admin").password(encoder.encode(password)).roles("USER", "STAFF").build(),
-                // 商家账号：经营决策方（退款审批的归属角色）。刻意不带 STAFF——
-                // 它能做什么由「MERCHANT」这一个角色说了算，日常运营执行权不下发。
-                User.withUsername("merchant").password(encoder.encode(merchantPassword))
-                        .roles("USER", "MERCHANT").build());
+        String demoHash = encoder.encode(password);
+        String merchantHash = encoder.encode(merchantPassword);
+
+        List<UserDetails> accounts = new ArrayList<>();
+        accounts.add(User.withUsername("student").password(demoHash).roles("USER").build());
+        accounts.add(User.withUsername("classmate").password(demoHash).roles("USER").build());
+        // 店员账号：演示「同一助手、不同权限」。密码与演示账号共用一份 ${mall.demo-password}。
+        accounts.add(User.withUsername("admin").password(demoHash).roles("USER", "STAFF").build());
+        // 商家账号：一家店一个，店主账号就是 merchant.owner_username。
+        // 角色刻意只有 MERCHANT、不带 STAFF——它能做什么由这一个角色说了算，
+        // 日常运营执行权（改价 / 改库存 / 发货）不下发给经营决策方。
+        // 1 号店的店主沿用既有 merchant 账号：它在既有测试与文档里就是「那个商家」。
+        for (MerchantView shop : merchants.all()) {
+            accounts.add(User.withUsername(shop.ownerUsername()).password(merchantHash)
+                    .roles("USER", "MERCHANT").build());
+        }
+        return new InMemoryUserDetailsManager(accounts);
     }
 
     @Bean

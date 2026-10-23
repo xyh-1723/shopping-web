@@ -135,7 +135,9 @@ class RefundRoutingTest {
         verify(catalog, never()).returnStock(anyLong(), anyInt(), any(), any());
 
         // 它真的落在了商家的待办事宜里（§4.3 路径 B 的落点）。
-        assertThat(refunds.pendingQueue(20).stream().map(RefundView::id).toList())
+        // 用 admin（店员）看全站队列——商家账号只能看到自己那家店的单，
+        // 而这条断言要证明的是「它进了队列」，不是「某个商家看得到它」。
+        assertThat(refunds.pendingQueueFor("admin", 20).stream().map(RefundView::id).toList())
                 .contains(refund.id());
     }
 

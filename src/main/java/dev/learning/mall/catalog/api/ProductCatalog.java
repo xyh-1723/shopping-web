@@ -5,7 +5,38 @@ import java.util.List;
 
 /** 商品模块的公开边界：订单只依赖此接口，不访问商品 Repository。 */
 public interface ProductCatalog {
-    List<ProductView> list();
+
+    /**
+     * 分页查商品。<b>这是唯一的列表入口</b>——没有"取全部"的方法。
+     *
+     * <p>为什么不允许取全部：目录只有 506 件时 {@code SELECT * FROM product} 无害，
+     * 实测扩到 1006 件时 {@code GET /api/products} 的响应就从 116KB 涨到 227KB，
+     * 线性外推到 5 万件是 11MB、50 万件是 113MB——而绝大多数调用方（货架首屏、
+     * 助手搜索）只想要前十几件。把"必须有上限"写进接口签名，比指望每个调用方
+     * 自己记得截断可靠。
+     *
+     * @return 本页数据 + <b>命中总数</b>（不受分页影响，前端靠它算页码）
+     */
+    ProductPage search(ProductQuery query);
+
+    /**
+     * 不带任何条件地"逛全店"：每个分类最多 {@code perCategory} 件，总共不超过 {@code limit} 件。
+     *
+     * <p>为什么不能直接用 {@link #search} 按价格升序截前 N 件：那只等于告诉用户
+     * "本店最值得展示的就是最便宜的 N 件"。分类间商品数量并不均衡（数码 20 件、
+     * 生活 3000 件），按名次轮流取才能保证小分类也出代表。
+     */
+    List<ProductView> sampleAcrossCategories(int perCategory, int limit);
+
+    /**
+     * 库存低于阈值的商品。
+     *
+     * <p>独立成方法而不是用 {@link #search} 表达，是因为它需要的是
+     * "{@code stock < :threshold} 按库存升序"，而 {@link ProductQuery} 里没有
+     * "按库存排序"这个语义——硬塞进去会让查询对象变成一堆布尔开关。
+     */
+    LowStockReport lowStock(double threshold, int limit);
+
     ProductView get(long id);
 
     /**

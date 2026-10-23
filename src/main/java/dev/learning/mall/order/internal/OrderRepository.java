@@ -20,15 +20,28 @@ public class OrderRepository {
         return jdbc.sql("SELECT * FROM mall_order WHERE id = :id AND username = :user" + (lock ? " FOR UPDATE" : ""))
                 .param("id", id).param("user", user).query(OrderRow.class).optional();
     }
+    Optional<OrderRow> lock(String id) {
+        return jdbc.sql("SELECT * FROM mall_order WHERE id = :id FOR UPDATE")
+                .param("id", id).query(OrderRow.class).optional();
+    }
+
     /**
      * 取出一行并加行锁，用于关单。
      *
      * <p>这里<b>不</b>限定用户：超时关闭是系统行为，不属于任何一次用户请求。
      * 权限检查只发生在用户发起的路径上（{@link #find(String, String, boolean)}），
      * 不能反过来让「系统想关掉一笔超时订单」也要先知道是谁在操作。
+     *
+     * <p>比 {@link #lock(String)} 多了 {@code SKIP LOCKED}：拿不到锁就<b>立刻返回空</b>，
+     * 而不是排队等。谁在锁着这行？多半是另一个实例正在关它（分片已经尽量避免这种情况，
+     * 这是第二道保险），也可能是买家正在付款。两种情况下等下去都没有意义——
+     * 等到了也只是发现状态已经变了。跳过之后这一笔下一轮还会被选中，不会丢。
+     *
+     * <p>返回空因此有两种含义（行不存在 / 行被别人锁着），调用方一律当作
+     * 「这一轮不归我处理」，与「已经不是 PENDING」是同一种结果。
      */
-    Optional<OrderRow> lock(String id) {
-        return jdbc.sql("SELECT * FROM mall_order WHERE id = :id FOR UPDATE")
+    Optional<OrderRow> lockForClose(String id) {
+        return jdbc.sql("SELECT * FROM mall_order WHERE id = :id FOR UPDATE SKIP LOCKED")
                 .param("id", id).query(OrderRow.class).optional();
     }
     List<OrderRow> list(String user) {
@@ -36,23 +49,45 @@ public class OrderRepository {
                 .param("user", user).query(OrderRow.class).list();
     }
     /**
-     * 到期的待支付订单。
+     * 到期的待支付订单，<b>只取本实例负责的那个分片</b>。
      *
      * <p>被处理掉的订单会离开这个结果集（状态不再是 PENDING），所以队列天然收敛：
      * 不需要游标，也不会出现「排在后面的永远扫不到」。
+     *
+     * <p>分片条件写进 WHERE 而不是捞回来再在 Java 里过滤：前者让数据库只扫自己的那一份，
+     * 后者每一轮都把全表的到期订单捞出来再丢掉 (N-1)/N，实例越多浪费越大——
+     * 而这正是分片本来要解决的问题。
+     *
+     * @param shardCount 分片总数；1 表示不分片（单实例部署，行为与分片前一致）
+     * @param shardIndex 本实例负责的分片序号，取值 {@code [0, shardCount)}
      */
-    List<String> expiredPending(LocalDateTime now, int limit) {
+    List<String> expiredPending(LocalDateTime now, int limit, int shardCount, int shardIndex) {
         return jdbc.sql("""
                         SELECT id FROM mall_order
                          WHERE status = 'PENDING' AND expires_at IS NOT NULL AND expires_at <= :now
+                           AND MOD(expiry_shard, :shardCount) = :shardIndex
                          ORDER BY expires_at, id
                          LIMIT :limit""")
-                .param("now", now).param("limit", limit).query(String.class).list();
+                .param("now", now).param("limit", limit)
+                .param("shardCount", shardCount).param("shardIndex", shardIndex)
+                .query(String.class).list();
     }
-    /** 还有多少笔待支付订单已经到期但尚未处理：积压量，用来判断扫描跟不跟得上。 */
-    int expiredBacklog(LocalDateTime now) {
-        return jdbc.sql("SELECT COUNT(*) FROM mall_order WHERE status = 'PENDING' AND expires_at IS NOT NULL AND expires_at <= :now")
-                .param("now", now).query(Integer.class).single();
+
+    /**
+     * 本实例负责的分片里，还有多少笔待支付订单已经到期但尚未处理：积压量。
+     *
+     * <p>与 {@link #expiredPending} 用<b>同一套分片条件</b>：积压量要回答的是
+     * 「我这台机器跟不跟得上」，不是「全局还剩多少」。用全局数字会让一个什么都不干的实例
+     * 报出别人的积压，排障时把人引到错误的机器上。
+     */
+    int expiredBacklog(LocalDateTime now, int shardCount, int shardIndex) {
+        return jdbc.sql("""
+                        SELECT COUNT(*) FROM mall_order
+                         WHERE status = 'PENDING' AND expires_at IS NOT NULL AND expires_at <= :now
+                           AND MOD(expiry_shard, :shardCount) = :shardIndex""")
+                .param("now", now)
+                .param("shardCount", shardCount).param("shardIndex", shardIndex)
+                .query(Integer.class).single();
     }
     /**
      * 落一笔订单。
@@ -63,16 +98,33 @@ public class OrderRepository {
      */
     public void insert(String id, String user, String key, String hash, BigDecimal subtotal, BigDecimal discount,
                 BigDecimal shippingFee, BigDecimal payAmount, LocalDateTime expiresAt) {
+        // 分片键在这里由订单号算出，不交给调用方传：它是订单号的纯函数，
+        // 多一个入口传值就多一处「两个实例算出不同结果」的机会，而那会直接导致
+        // 某些订单没有任何实例负责扫描。
+        int expiryShard = OrderShard.of(id);
         jdbc.sql("""
                         INSERT INTO mall_order(id,username,idempotency_key,request_hash,total,
-                                               subtotal,discount,shipping_fee,pay_amount,status,expires_at)
-                        VALUES(:id,:user,:key,:hash,:pay,:subtotal,:discount,:shippingFee,:pay,'PENDING',:expiresAt)""")
+                                               subtotal,discount,shipping_fee,pay_amount,status,expires_at,expiry_shard)
+                        VALUES(:id,:user,:key,:hash,:pay,:subtotal,:discount,:shippingFee,:pay,'PENDING',:expiresAt,:shard)""")
                 .param("id", id).param("user", user).param("key", key).param("hash", hash)
                 .param("pay", payAmount).param("subtotal", subtotal).param("discount", discount)
-                .param("shippingFee", shippingFee).param("expiresAt", expiresAt).update();
+                .param("shippingFee", shippingFee).param("expiresAt", expiresAt)
+                .param("shard", expiryShard).update();
     }
+    /**
+     * 落一条明细。<b>{@code merchant_id} 在这一刻从商品带下来</b>，不交给调用方传。
+     *
+     * <p>为什么要在这里拷贝一份而不是每次 JOIN product 去查：明细上的商家是
+     * <b>下单那一刻</b>的归属，而商品以后可能改挂到别的店（换供应商、店铺转让）。
+     * 现查会让历史订单的归属跟着漂移，于是「这笔退款当年是哪家店的锅」永远查不清。
+     *
+     * <p>为什么不放在 Java 里先查一次再传进来：多一次往返就多一处
+     * 「两个值不一致」的机会，而这个值必须是同一条 INSERT 读到的那个快照。
+     */
     void insertItem(String id, OrderView.Item item) {
-        jdbc.sql("INSERT INTO order_item(order_id,product_id,product_name,unit_price,quantity) VALUES(:id,:pid,:name,:price,:qty)")
+        jdbc.sql("INSERT INTO order_item(order_id,product_id,product_name,unit_price,quantity,merchant_id)"
+                        + " VALUES(:id,:pid,:name,:price,:qty,"
+                        + "        (SELECT merchant_id FROM product WHERE id = :pid))")
                 .param("id", id).param("pid", item.productId()).param("name", item.productName())
                 .param("price", item.unitPrice()).param("qty", item.quantity()).update();
     }

@@ -5,8 +5,11 @@
 -- 复制出第二份实现，就是这些规则分叉的开始（项目决策第 2 条：安全关键逻辑只有一份实现）。
 
 -- 原表为「支付」而生，这两列当时是 NOT NULL；泛化后只有 ORDER_PAYMENT 才需要它们。
-ALTER TABLE assistant_pending_action ALTER COLUMN order_id SET NULL;
-ALTER TABLE assistant_pending_action ALTER COLUMN payment_method SET NULL;
+-- MySQL 没有 H2 的 `ALTER COLUMN ... SET NULL`，只有 MODIFY，而 MODIFY 必须把类型重复一遍
+-- （所以这里写死了 VARCHAR(36) / VARCHAR(20)，与 V5 的原定义一致）。
+-- 这是两侧语法唯一的交集，代价是改列类型时要记得同步这一行。
+ALTER TABLE assistant_pending_action MODIFY COLUMN order_id VARCHAR(36) NULL;
+ALTER TABLE assistant_pending_action MODIFY COLUMN payment_method VARCHAR(20) NULL;
 
 -- ORDER_CREATE 的载荷：服务端生成的幂等键、要下的商品行。
 -- 没有加「请求指纹」列：行内容原样落在这里，且幂等键每次随机生成、不可能被重放；

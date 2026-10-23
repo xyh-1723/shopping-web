@@ -379,6 +379,18 @@ main {
   background: var(--ink);
   border-color: var(--ink);
 }
+/* 分页器：翻页是"看更多"的唯一入口，所以它必须比卡片之间的留白更显眼一点。 */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 28px;
+}
+.pager .button[disabled] {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 .product-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

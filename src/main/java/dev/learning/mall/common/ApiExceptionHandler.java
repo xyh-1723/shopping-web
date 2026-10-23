@@ -25,11 +25,18 @@ public class ApiExceptionHandler {
         return ResponseEntity.notFound().build();
     }
     @ExceptionHandler({MethodArgumentNotValidException.class, HttpMessageNotReadableException.class,
-            MissingRequestHeaderException.class, MethodArgumentTypeMismatchException.class})
+            MissingRequestHeaderException.class, MethodArgumentTypeMismatchException.class,
+            // 直接标在 @RequestParam 上的 @Min/@Max 走的是 Bean Validation，抛的是这个；
+            // 不接住它就掉进下面的 Exception 兜底变成 500——客户端传错参数是 4xx，不是服务端出错。
+            jakarta.validation.ConstraintViolationException.class})
     public ResponseEntity<?> validation(Exception e) {
         String message = "请求格式不正确，请检查必填字段、数量和请求头";
         if (e instanceof MethodArgumentNotValidException invalid) {
             message = invalid.getBindingResult().getAllErrors().getFirst().getDefaultMessage();
+        } else if (e instanceof jakarta.validation.ConstraintViolationException violation) {
+            message = violation.getConstraintViolations().stream()
+                    .findFirst().map(v -> v.getPropertyPath() + " " + v.getMessage())
+                    .orElse(message);
         }
         return ResponseEntity.badRequest().body(Map.of("code", "INVALID_REQUEST", "message", message));
     }

@@ -346,14 +346,16 @@ class OrderExpiryTest {
     }
 
     @Test
-    @DisplayName("V10 的存量回填语句在本库上真的能跑（DATEADD 是 H2 方言，写错就是迁移崩）")
+    @DisplayName("V10 的存量回填语句在本库上真的能跑（日期加减是方言重灾区，写错就是迁移崩）")
     void legacyPendingOrdersAreBackfilledByTheMigrationStatement() {
         String id = UUID.randomUUID().toString();
         jdbc.sql("INSERT INTO mall_order(id,username,idempotency_key,request_hash,total,status,created_at) VALUES(:id,'student',:key,'hash',39.00,'PENDING',:created)")
                 .param("id", id).param("key", UUID.randomUUID().toString()).param("created", BASE.minusDays(1)).update();
 
         // 与 V10__order_expiry.sql 中的回填语句逐字一致；改一处就要改另一处。
-        int filled = jdbc.sql("UPDATE mall_order SET expires_at = DATEADD('MINUTE', 15, created_at) WHERE status = 'PENDING' AND expires_at IS NULL").update();
+        // 用 TIMESTAMPADD 而不是 DATEADD：DATEADD 是 H2 专有，MySQL 上没有；
+        // 而 MySQL 的 DATE_ADD 在 H2 上又没有。两边都成立的只有 TIMESTAMPADD。
+        int filled = jdbc.sql("UPDATE mall_order SET expires_at = TIMESTAMPADD(MINUTE, 15, created_at) WHERE status = 'PENDING' AND expires_at IS NULL").update();
         assertThat(filled).isEqualTo(1);
 
         LocalDateTime expiresAt = jdbc.sql("SELECT expires_at FROM mall_order WHERE id=:id").param("id", id).query(LocalDateTime.class).single();

@@ -4,7 +4,8 @@ import dev.learning.mall.assistant.internal.CatalogTools;
 import dev.learning.mall.cart.api.CartView;
 import dev.learning.mall.cart.internal.CartService;
 import dev.learning.mall.catalog.api.ProductCatalog;
-import dev.learning.mall.catalog.api.ProductView;
+import dev.learning.mall.catalog.api.ProductPage;
+import dev.learning.mall.catalog.api.ProductQuery;
 import dev.learning.mall.order.api.CreateOrderRequest;
 import dev.learning.mall.order.api.OrderView;
 import dev.learning.mall.order.internal.OrderFacade;
@@ -133,10 +134,10 @@ class CatalogScaleBenchmarkTest {
     private List<Sample> measureAll() throws Exception {
         List<Sample> out = new ArrayList<>();
 
-        // 1. 商品列表（服务端全量）：分页缺失与否，就看这一条的返回件数。
-        out.add(measure("1 商品列表 catalog.list()", READ_RUNS, () -> {}, () -> {
-            List<ProductView> all = catalog.list();
-            return all.size() + " 件";
+        // 1. 商品列表（服务端分页）：返回件数应当恒定，不随目录规模增长。
+        out.add(measure("1 商品列表 catalog.search(page)", READ_RUNS, () -> {}, () -> {
+            ProductPage page = catalog.search(ProductQuery.firstPage(24));
+            return page.items().size() + " 件 / 共 " + page.total() + " 件";
         }));
 
         // 2. 列表接口（HTTP + JSON 序列化）：页面首页每一次加载都要拉它。
@@ -265,12 +266,13 @@ class CatalogScaleBenchmarkTest {
         System.out.println("  注意：截断保住了 token 预算，但也意味着模型只看得到按价格升序的**前一段**结果——");
         System.out.println("        这是一个质量/正确性问题，不是性能问题。");
         System.out.println();
-        System.out.println("【分页】ProductCatalog#list() 与 GET /api/products 都没有 page/size 参数：");
-        System.out.println("        返回件数 = 商品总件数，前端 app.js 把整个数组 innerHTML 渲染。");
+        System.out.println("【分页】ProductCatalog 只有 search(ProductQuery) 一个列表入口，page/size 是必填的：");
+        System.out.println("        单页上限 " + ProductQuery.MAX_SIZE + " 件，默认 24 件；"
+                + "GET /api/products 的响应字节数不再随商品总数增长。");
         System.out.println();
-        System.out.println("【全表扫描调用点】catalog.list() 共 4 处：ProductController#list、"
-                + "CatalogTools#searchProducts、");
-        System.out.println("        CatalogTools#recommendByBudget、StaffTools（低库存）。每一处的代价都随商品总数线性增长。");
+        System.out.println("【全表扫描调用点】已清零。原先 catalog.list() 的 4 处调用——ProductController#list、");
+        System.out.println("        CatalogTools#searchProducts、CatalogTools#recommendByBudget、StaffTools（低库存）——");
+        System.out.println("        已分别改为 search / sampleAcrossCategories / lowStock，筛选与截断全部下推到 SQL。");
         System.out.println("======================================================================");
         System.out.println();
     }

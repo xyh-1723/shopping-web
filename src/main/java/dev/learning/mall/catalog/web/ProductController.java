@@ -8,15 +8,36 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import java.math.BigDecimal;
 import java.security.Principal;
-import java.util.List;
+import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/products")
+@Validated // 让 @Min/@Max 作用于 @RequestParam：否则 page/size 越界会穿到 ProductQuery 里变成 500
 public class ProductController {
     private final ProductCatalog catalog;
     public ProductController(ProductCatalog catalog) { this.catalog = catalog; }
-    @GetMapping public List<ProductView> list() { return catalog.list(); }
+
+    /**
+     * 商品列表（<b>分页</b>）。
+     *
+     * <p>原来这里是无条件 {@code SELECT * FROM product}。实测目录 506 件时响应 116KB，
+     * 1006 件时 227KB——每翻一倍流量也翻一倍，而首屏其实只看得见二十几件。
+     * 现在筛选、排序、分页全部下推到 SQL，服务端最多传 {@link ProductQuery#MAX_SIZE} 件。
+     *
+     * <p>{@code total} 一并返回：没有总数前端就写不出分页器，
+     * 用户会以为"这家店只有 24 件"。
+     */
+    @GetMapping
+    public ProductPage list(@RequestParam(required = false) String keyword,
+                            @RequestParam(required = false) String category,
+                            @RequestParam(required = false) BigDecimal maxPrice,
+                            @RequestParam(defaultValue = "false") boolean inStock,
+                            @RequestParam(defaultValue = "0") @Min(0) int page,
+                            @RequestParam(defaultValue = "24") @Min(1) @Max(ProductQuery.MAX_SIZE) int size) {
+        return catalog.search(new ProductQuery(keyword, category, maxPrice, inStock, ProductSort.ID_ASC, page, size));
+    }
+
     @GetMapping("/{id}") public ProductView get(@PathVariable long id) { return catalog.get(id); }
 
     public record PriceRequest(@NotNull @DecimalMin("0.01") BigDecimal price) {}

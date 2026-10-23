@@ -3,6 +3,8 @@ package dev.learning.mall.order.internal;
 import dev.learning.mall.catalog.api.ProductCatalog;
 import dev.learning.mall.common.BusinessException;
 import dev.learning.mall.common.Observed;
+import dev.learning.mall.merchant.api.MerchantDirectory;
+import dev.learning.mall.merchant.api.MerchantView;
 import dev.learning.mall.messaging.api.DomainEventPublisher;
 import dev.learning.mall.order.api.OrderRefunds;
 import dev.learning.mall.order.api.OrderView;
@@ -80,6 +82,12 @@ public class RefundService implements OrderRefunds {
     /** 允许的退款原因码；与 {@code refund.reason_code} 的业务口径一致。 */
     static final List<String> REASON_CODES = List.of("NO_REASON", "DAMAGED", "WRONG_ITEM", "OTHER");
 
+    /** 与 {@link dev.learning.mall.assistant.security.AssistantActor#ROLE_MERCHANT} 同一个字面量。 */
+    private static final String ROLE_MERCHANT = "ROLE_MERCHANT";
+
+    /** 同上：店员。这里不引用 assistant 包的常量，避免 order 反向依赖 assistant。 */
+    private static final String ROLE_STAFF = "ROLE_STAFF";
+
     private final OrderRepository orders;
     private final RefundRepository refunds;
     private final ProductCatalog catalog;
@@ -87,11 +95,12 @@ public class RefundService implements OrderRefunds {
     private final DomainEventPublisher events;
     private final OrderProperties properties;
     private final UserDetailsService users;
+    private final MerchantDirectory merchants;
     private final Clock clock;
 
     public RefundService(OrderRepository orders, RefundRepository refunds, ProductCatalog catalog,
             PaymentRouter payments, DomainEventPublisher events, OrderProperties properties,
-            UserDetailsService users, Clock clock) {
+            UserDetailsService users, MerchantDirectory merchants, Clock clock) {
         this.orders = orders;
         this.refunds = refunds;
         this.catalog = catalog;
@@ -99,6 +108,7 @@ public class RefundService implements OrderRefunds {
         this.events = events;
         this.properties = properties;
         this.users = users;
+        this.merchants = merchants;
         this.clock = clock;
     }
 
@@ -164,9 +174,13 @@ public class RefundService implements OrderRefunds {
     @Observed("approve-refund")
     @Override
     public RefundView approve(String refundId, String merchant, String note) {
-        requireMerchant(merchant);
+        MerchantView shop = requireMerchant(merchant);
         RefundRow refund = refunds.find(refundId)
                 .orElseThrow(() -> BusinessException.notFound("退款不存在"));
+        // 归属校验：这笔退款的订单里必须有这家店的商品。
+        // 少了这一步，「商家」就还是一顶「能批全部退款」的帽子——
+        // 加 merchant 表之前的状态，只不过那时候连「谁的店」都问不出来。
+        requireOwnShop(refund, shop);
         OrderRow order = orders.lock(refund.orderId())
                 .orElseThrow(() -> BusinessException.notFound("订单不存在"));
         disburse(refundId, merchant, trimToNull(note), order, refund.amount());
@@ -177,9 +191,12 @@ public class RefundService implements OrderRefunds {
     @Observed("reject-refund")
     @Override
     public RefundView reject(String refundId, String merchant, String note) {
-        requireMerchant(merchant);
+        MerchantView shop = requireMerchant(merchant);
         RefundRow refund = refunds.find(refundId)
                 .orElseThrow(() -> BusinessException.notFound("退款不存在"));
+        // 驳回同样要判归属：虽然它不放款，但它能让一笔申请彻底终结，
+        // 「A 把 B 的退款申请驳回去」与「A 批准了 B 的退款」是同一个洞的两半。
+        requireOwnShop(refund, shop);
         if (refunds.markRejected(refundId, merchant, trimToNull(note), LocalDateTime.now(clock)) != 1) {
             throw BusinessException.conflict("ALREADY_RESOLVED", "这笔退款已经处理过了");
         }
@@ -189,10 +206,34 @@ public class RefundService implements OrderRefunds {
         return refunds.view(refunds.find(refundId).orElseThrow(() -> BusinessException.notFound("退款不存在")));
     }
 
+    /**
+     * 待审批队列，按申请时间正序（先来先判）。
+     *
+     * <p><b>可见范围由账号是谁决定，而且只在这一处决定</b>：
+     * <ul>
+     *   <li>店员：全站。店员本来就能看经营数据与其他用户的订单，这不是新的信息泄露。</li>
+     *   <li>商家：只有自己那家店的单（{@code order_item.merchant_id}）。</li>
+     *   <li>都不是：403。</li>
+     * </ul>
+     * 把它写成「一个方法 + 调用方传一个 boolean 说要不要过滤」是最容易出事的做法：
+     * 那个 boolean 迟早会在某个新入口处传错，而传错的后果是一个商家看到别人的退款。
+     * 由账号自己推导范围，新入口就没有任何东西可以传错。
+     *
+     * @param viewer 查看者账号；只有店员与商家能看，其余 403
+     */
     @Transactional(readOnly = true)
     @Override
-    public List<RefundView> pendingQueue(int limit) {
-        return refunds.pendingQueue(limit).stream().map(refunds::view).toList();
+    public List<RefundView> pendingQueueFor(String viewer, int limit) {
+        Set<String> authorities = authoritiesOf(viewer);
+        if (authorities.contains(ROLE_STAFF)) {
+            return refunds.pendingQueue(limit).stream().map(refunds::view).toList();
+        }
+        if (authorities.contains(ROLE_MERCHANT)) {
+            MerchantView shop = shopOf(viewer);
+            return refunds.pendingQueueOf(shop.id(), limit).stream().map(refunds::view).toList();
+        }
+        throw new BusinessException(HttpStatus.FORBIDDEN, "REFUND_QUEUE_FORBIDDEN",
+                "只有店员或商家才能查看待审批的退款队列");
     }
 
     // ——————————————————— 放款：唯一入口 ———————————————————
@@ -312,25 +353,61 @@ public class RefundService implements OrderRefunds {
     }
 
     /**
-     * 服务层的纵深防御：URL 级 {@code hasRole("MERCHANT")} 是外层，这里再判一次——
+     * 服务层的纵深防御 + 归属解析：先确认这个账号是商家，再确认它是<b>哪一家</b>店。
+     *
+     * <p>URL 级 {@code hasRole("MERCHANT")} 是外层，这里再判一次——
      * 「直接注入 Service 调用」这条路不该因为没有 HTTP 就失守。
      *
      * <p>角色从 {@link UserDetailsService} 解析，而不是让调用方传一个自称的角色集合：
      * 传参等于把判定权交给调用方，这条线迟早会在某个新入口处被绕过。
+     *
+     * <p><b>第二步（账号 → 店）是这次新加的，也是这次真正堵的那个洞</b>：
+     * 只判角色，得到的是「所有商家都能批所有退款」；
+     * 判了归属，退款才第一次有「你的店」可言。
+     *
+     * @return 该账号对应的店；拿不到就抛 403（<b>归属缺失按无权处理</b>，
+     *         绝不退化成「那就给他全部」或「那就给他第一家」）
      */
-    private void requireMerchant(String username) {
+    private MerchantView requireMerchant(String username) {
+        if (!authoritiesOf(username).contains(ROLE_MERCHANT)) {
+            throw new BusinessException(HttpStatus.FORBIDDEN, "REFUND_APPROVAL_FORBIDDEN",
+                    "只有商家（MERCHANT）才能审批退款，当前账号无权执行");
+        }
+        return shopOf(username);
+    }
+
+    /**
+     * 账号 → 店。查不到就是 403：一个带着 MERCHANT 角色却没有店铺行的账号，
+     * 是配置错误不是权限——让它「先过再说」等于把配置错误翻译成越权。
+     */
+    private MerchantView shopOf(String username) {
+        return merchants.ofOwner(username)
+                .orElseThrow(() -> new BusinessException(HttpStatus.FORBIDDEN, "MERCHANT_SHOP_MISSING",
+                        "账号没有关联的店铺，无法处理退款（归属缺失按无权处理）"));
+    }
+
+    /**
+     * 这笔退款的订单里必须有这家店的商品。
+     *
+     * <p>「存在但不是你的」与「不存在」给同一个答复（404），
+     * 免得把别人订单号的存在性泄露出去——与 {@code apply} 里那条归属校验同一个口径。
+     */
+    private void requireOwnShop(RefundRow refund, MerchantView shop) {
+        if (!refunds.involvesMerchant(refund.orderId(), shop.id())) {
+            throw BusinessException.notFound("退款不存在");
+        }
+    }
+
+    /** 账号的权限集合；查不到账号 = 空集合，绝不因为查不到而放行。 */
+    private Set<String> authoritiesOf(String username) {
         Set<String> authorities = new LinkedHashSet<>();
         try {
             UserDetails details = users.loadUserByUsername(username);
             details.getAuthorities().forEach(a -> authorities.add(a.getAuthority()));
         } catch (RuntimeException unknown) {
-            // 查不到就按「没有权限」处理，绝不因为查不到而放行。
             authorities.clear();
         }
-        if (!authorities.contains("ROLE_MERCHANT")) {
-            throw new BusinessException(HttpStatus.FORBIDDEN, "REFUND_APPROVAL_FORBIDDEN",
-                    "只有商家（MERCHANT）才能审批退款，当前账号无权执行");
-        }
+        return authorities;
     }
 
     private static String trimToNull(String text) {
