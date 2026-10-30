@@ -47,6 +47,25 @@ public final class MoneyUnits {
     }
 
     /**
+     * 百分数 → 万分比（basis points）。例如 {@code 10.00}（即 10%）→ {@code 1000}。
+     *
+     * <p>与元→分同一个理由：折扣比例也必须在整数上算，{@code 0.1} 这类小数
+     * 一旦参与 {@code floor} 就不是确定的结果。全项目只有这里做百分数换算，
+     * 于是「折扣比例怎么表示」也只有一处定义。
+     *
+     * @param percent 百分数，小数位不得超过 2，且必须在 {@code (0, 100]} 之间
+     * @throws IllegalArgumentException 为 {@code null}、精度超过 2 位或超出取值范围
+     */
+    public static long percentToBps(BigDecimal percent) {
+        if (percent == null) throw new IllegalArgumentException("折扣比例不能为空");
+        if (percent.scale() > 2) throw new IllegalArgumentException("折扣比例精度超过两位小数：" + percent);
+        if (percent.signum() <= 0 || percent.compareTo(BigDecimal.valueOf(100)) > 0) {
+            throw new IllegalArgumentException("折扣比例必须在 0 到 100 之间：" + percent);
+        }
+        return percent.movePointRight(2).longValueExact();
+    }
+
+    /**
      * 分 → 元（两位小数）。<b>仅用于展示与错误文案</b>，任何落库路径都不该用它。
      *
      * <p>之所以允许它存在，是因为「¥19.99」这种人类可读形态总要有个产地；

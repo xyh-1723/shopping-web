@@ -116,7 +116,7 @@ class RefundOwnershipTest {
 
         // 直击 Service：没有 HTTP、没有 HITL 卡片，外层那道归属校验整个被绕过去了。
         BusinessException denied = catchThrowableOfType(
-                () -> refunds.apply(paid.id(), b, null, "NO_REASON", "替别人退一下"),
+                () -> refunds.apply(paid.id(), SubOrders.only(paid), b, null, "NO_REASON", "替别人退一下"),
                 BusinessException.class);
 
         assertThat(denied).as("第二层归属校验必须自己站得住：外层被绕过时它不该跟着失效").isNotNull();
@@ -131,7 +131,7 @@ class RefundOwnershipTest {
 
         // 反向控制：同一个 Service、同一笔订单，本人调用一切正常。
         // 少了这一句，上面那条绿也可能来自「这个入口对所有人都报 404」的偷懒实现。
-        RefundView own = refunds.apply(paid.id(), a, null, "NO_REASON", "不想要了");
+        RefundView own = refunds.apply(paid.id(), SubOrders.only(paid), a, null, "NO_REASON", "不想要了");
         assertThat(own.route()).isEqualTo(RefundView.ROUTE_AUTO);
         assertThat(own.status()).isEqualTo(RefundView.STATUS_REFUNDED);
         assertThat(countRefunds(paid.id())).isEqualTo(1);

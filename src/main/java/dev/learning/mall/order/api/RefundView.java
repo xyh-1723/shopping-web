@@ -27,8 +27,17 @@ import java.time.LocalDateTime;
  * <p><b>{@code stockReturned} 的含义容易被读反</b>：它是 {@code false} 不代表漏还，
  * 因为<b>已发货 / 已收货的订单退款只退钱、不还货</b>（货在买家手上，还回去就是凭空造货），
  * 那种情况下 {@code false} 才是正确答案。
+ *
+ * <h3>{@code orderSubId}：退款的归属是子订单（V25）</h3>
+ *
+ * <p>{@code orderId} 回答「这笔钱是从哪次交易里出来的」，{@code orderSubId} 回答
+ * 「这笔钱是<b>哪家店</b>的」。跨店订单下这两个答案不再等价，而退款的每一条规则
+ * ——谁能看见、谁能批、最多能退多少、退完要还哪几件货——问的都是后者。
+ *
+ * <p>它非空：V25 把 {@code refund.order_sub_id} 改成了 {@code NOT NULL}，
+ * 于是「一笔退款没有归属」在数据库里就写不进去，不依赖调用方记得传。
  */
-public record RefundView(String id, String orderId, String username, BigDecimal amount,
+public record RefundView(String id, String orderId, String orderSubId, String username, BigDecimal amount,
                          String reasonCode, String reasonText, String route, String status,
                          String requestedBy, String decidedBy, LocalDateTime decidedAt,
                          String decisionNote, boolean stockReturned, LocalDateTime createdAt) {

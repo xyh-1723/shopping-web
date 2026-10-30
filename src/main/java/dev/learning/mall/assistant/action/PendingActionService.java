@@ -21,8 +21,10 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.stream.Collectors;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -67,7 +69,7 @@ public class PendingActionService {
     private static final String ATTRIBUTE_CREATED = "pending-action.created";
 
     private record ActionRow(String id, String username, String conversationId, String kind,
-                             String orderId, BigDecimal amount, String method, String status,
+                             String orderId, String orderSubId, BigDecimal amount, String method, String status,
                              String idempotencyKey, String linesJson, String quoteId,
                              String refundReasonCode, String refundReasonText,
                              LocalDateTime expiresAt) {}
@@ -76,9 +78,9 @@ public class PendingActionService {
     public record Resolution(PendingActionView action, OrderView order) {}
 
     private static final String SELECT =
-            "SELECT id, username, conversation_id, kind, order_id, amount, payment_method AS method, "
-                    + "status, idempotency_key, lines_json, quote_id, refund_reason_code, "
-                    + "refund_reason_text, expires_at "
+            "SELECT id, username, conversation_id, kind, order_id, order_sub_id, amount, "
+                    + "payment_method AS method, status, idempotency_key, lines_json, quote_id, "
+                    + "refund_reason_code, refund_reason_text, expires_at "
                     + "FROM assistant_pending_action ";
 
     private final JdbcClient jdbc;
@@ -281,40 +283,55 @@ public class PendingActionService {
      * <p><b>为什么<b>不</b>把商家审批也搬进来</b>：见 {@code MerchantRefundController} 的类注释——
      * HITL 的语义是「模型替人发起、<b>本人</b>确认」，而审批在定义上就是另一个人。
      *
-     * @param amount     拟退金额（元，两位小数）；{@code null} = 退这笔订单实付的全部
+     * <h3>为什么必须指定子订单（V25）</h3>
+     *
+     * <p>退款的单位是子订单：可退上限、发货判据、还货范围、谁能批——全都以「哪家店」为界。
+     * 所以这里在<b>建卡片时就要求把它定下来</b>，而不是等确认时再让 {@code RefundService} 报错：
+     * 卡片上写的金额必须是「待会儿真会退的那个数」，而那个数只有子订单定下来之后才存在。
+     * 跨店订单不给 {@code subId} → 当场 400 并把候选店列出来交给模型转述，
+     * <b>绝不替用户挑一家</b>。
+     *
+     * @param subId      要退的子订单号；{@code null}/空表示「这笔订单只有一家店」
+     * @param amount     拟退金额（元，两位小数）；{@code null} = 退该子订单的全部
      * @param reasonCode 退款原因码；为空按 {@code NO_REASON}（无理由）处理
      */
-    public PendingActionView requestOrderRefund(String username, String orderId, BigDecimal amount,
-                                                String reasonCode, String reasonText) {
+    public PendingActionView requestOrderRefund(String username, String orderId, String subId,
+                                                BigDecimal amount, String reasonCode, String reasonText) {
         OrderView order = insights.ordersOf(username).stream()
                 .filter(o -> o.id().equals(orderId)).findFirst()
                 .orElseThrow(() -> BusinessException.notFound("订单不存在或不属于当前用户"));
         if (!"PAID".equals(order.status())) {
             throw BusinessException.conflict("INVALID_STATE", "只有已支付的订单才能申请退款");
         }
+        String resolvedSub = resolveRefundSubId(order, subId);
         // 已出现的同类待确认卡片直接复用：模型可能在一轮里把同一个工具调两次，
         // 刷两张卡的结果只会让买家以为要退两笔。
+        // 判据带上子订单：先退 A 店、再退 B 店是两次不同申请，不该被同一张卡片挡回去。
         Optional<ActionRow> existing = jdbc.sql(SELECT
                         + "WHERE username = :user AND order_id = :order AND kind = :kind "
-                        + "AND status = 'PENDING' AND expires_at > CURRENT_TIMESTAMP ORDER BY seq DESC LIMIT 1")
+                        + "AND status = 'PENDING' AND expires_at > CURRENT_TIMESTAMP ORDER BY seq DESC")
                 .param("user", username).param("order", orderId).param("kind", KIND_ORDER_REFUND)
-                .query(ActionRow.class).optional();
+                .query(ActionRow.class).list().stream()
+                .filter(r -> Objects.equals(r.orderSubId(), resolvedSub))
+                .findFirst();
         if (existing.isPresent()) return toView(existing.get());
 
         String conversationId = TurnScope.conversationId();
         String id = UUID.randomUUID().toString();
         LocalDateTime expires = LocalDateTime.now().plusMinutes(security.getPaymentConfirmTtlMinutes());
         jdbc.sql("INSERT INTO assistant_pending_action(id,username,conversation_id,kind,order_id,"
-                        + "amount,refund_reason_code,refund_reason_text,status,expires_at) "
-                        + "VALUES(:id,:user,:conv,:kind,:order,:amount,:code,:text,'PENDING',:expires)")
+                        + "order_sub_id,amount,refund_reason_code,refund_reason_text,status,expires_at) "
+                        + "VALUES(:id,:user,:conv,:kind,:order,:sub,:amount,:code,:text,'PENDING',:expires)")
                 .param("id", id)
                 .param("user", username)
                 .param("conv", conversationId)
                 .param("kind", KIND_ORDER_REFUND)
                 .param("order", orderId)
+                .param("sub", resolvedSub)
                 // 金额同样服务端算出：模型只能表达「退多少」或「全退」，
                 // 卡片上显示的数必须和待会儿真退的数一致，不能有两个来源。
-                .param("amount", amount == null ? order.payAmount() : amount)
+                // 「全退」= 这个子订单的全部，不是整单实付。
+                .param("amount", amount == null ? subPayAmount(order, resolvedSub) : amount)
                 .param("code", reasonCode == null ? "NO_REASON" : reasonCode.strip().toUpperCase(Locale.ROOT))
                 .param("text", reasonText)
                 .param("expires", expires)
@@ -420,8 +437,8 @@ public class PendingActionService {
                     // 走的同样是页面 POST /api/orders/{id}/refunds 那一份实现：
                     // 分流判定、库存幂等、放款条件因此只存在一份，
                     // 不会分叉成「助手路径能自助退、页面路径要等商家」。
-                    RefundView refund = refunds.apply(row.orderId(), username, row.amount(),
-                            row.refundReasonCode(), row.refundReasonText());
+                    RefundView refund = refunds.apply(row.orderId(), row.orderSubId(), username,
+                            row.amount(), row.refundReasonCode(), row.refundReasonText());
                     audit.record(username, row.conversationId(), AssistantAudit.STAGE_TOOL, "CONFIRM",
                             auditPrefix(row.kind()) + "_CONFIRM", "LLM06",
                             "本人确认退款：订单 " + row.orderId().substring(0, 8)
@@ -455,7 +472,45 @@ public class PendingActionService {
 
     private PendingActionView toView(ActionRow row) {
         return new PendingActionView(row.id(), row.conversationId(), row.kind(), row.orderId(),
-                row.amount(), row.method(), row.status(), row.expiresAt());
+                row.orderSubId(), row.amount(), row.method(), row.status(), row.expiresAt());
+    }
+
+    /**
+     * 退的是哪一家店：把子订单号定下来（退款卡片专用）。
+     *
+     * <p>与 {@code RefundService} 里的同名判定是<b>两处刻意的重复</b>，不是复制粘贴漏改：
+     * 这里要在建卡片时就定下它（卡片金额必须是待会儿真会退的那个数），
+     * 那一处是执行时的最后一道（HITL 也可能被绕过，服务层不能指望上游）。
+     * 两处判据一致（单店自动定、跨店拒绝、指定的必须属于这笔订单）。
+     *
+     * @param subId 模型/页面传来的子订单号，可为空
+     */
+    private static String resolveRefundSubId(OrderView order, String subId) {
+        List<OrderView.SubView> subs = order.subs() == null ? List.of() : order.subs();
+        if (subId != null && !subId.isBlank()) {
+            String want = subId.strip();
+            if (subs.stream().noneMatch(s -> s.id().equals(want))) {
+                throw BusinessException.notFound("子订单不存在或不属于这笔订单");
+            }
+            return want;
+        }
+        if (subs.isEmpty()) {
+            throw BusinessException.conflict("SUB_ORDER_MISSING", "这笔订单还没有子订单，无法退款");
+        }
+        if (subs.size() > 1) {
+            String ids = subs.stream().map(s -> s.merchantName() + "(" + s.id() + ")")
+                    .collect(Collectors.joining("、"));
+            throw BusinessException.badRequest("SUB_ORDER_REQUIRED",
+                    "这笔订单包含 " + subs.size() + " 家店的商品，请让用户选择要退哪一家：" + ids);
+        }
+        return subs.get(0).id();
+    }
+
+    /** 「全退」的金额 = 这个子订单的那一份，不是整单实付。取不到就退回整单（不该发生，但也不该 NPE）。 */
+    private static BigDecimal subPayAmount(OrderView order, String subId) {
+        if (order.subs() == null) return order.payAmount();
+        return order.subs().stream().filter(s -> s.id().equals(subId)).map(OrderView.SubView::payAmount)
+                .findFirst().orElse(order.payAmount());
     }
 
     private String writeLines(List<CreateOrderRequest.Line> lines) {

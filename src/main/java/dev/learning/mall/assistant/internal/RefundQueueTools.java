@@ -57,7 +57,7 @@ public class RefundQueueTools {
         this.json = json;
     }
 
-    @Tool("列出待商家审批的退款队列（先申请的排在前面），含退款单号、订单号、买家账号、金额与原因。"
+    @Tool("列出待商家审批的退款队列（先申请的排在前面），含退款单号、订单号、子订单号、买家账号、金额与原因。"
             + "店员与商家账号可调用；队列里的退款只能由商家批准或驳回。返回 JSON 数组；队列为空时返回空数组。")
     public String pendingRefundQueue(@ToolMemoryId String username) {
         if (denied(username, "pendingRefundQueue")) return denial();
@@ -70,6 +70,9 @@ public class RefundQueueTools {
             ObjectNode node = json.createObjectNode();
             node.put("id", r.id());
             node.put("orderId", r.orderId());
+            // 子订单号必须回给模型：批准的是「这一家店」的那一份，
+            // 少了它，模型无从向商家说明这笔退的是谁家的钱。
+            node.put("subOrderId", r.orderSubId());
             node.put("username", r.username());
             node.put("amount", r.amount());
             node.put("reasonCode", r.reasonCode());

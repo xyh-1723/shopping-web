@@ -10,7 +10,6 @@ import dev.learning.mall.proactive.api.RelatedProduct;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -101,26 +100,36 @@ public class RelatedRecommendationService {
         return seeds.stream().limit(MAX_SEEDS).collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
-    /** 路径 A：共同购买。买过我的商品的人，还一起买了什么。 */
+    /**
+     * 路径 A：共同购买。买过我的商品的人，还一起买了什么。
+     *
+     * <p><b>商品字段在 SQL 里 JOIN 出来，不在 Java 里逐行再查</b>。原实现对聚合结果
+     * 每行调一次 {@code productOrNull}，而且聚合查询本身<b>没有 LIMIT</b>——
+     * 候选多时等于「先读全表、再一行一条 SQL、最后只用前几件」。
+     * 现在过滤（有货、排除种子）与 LIMIT 都下推到 SQL，Java 只处理结果集本身。
+     */
     private void addCoPurchase(List<RelatedProduct> out, Set<Long> picked, Set<Long> seeds,
                                int size, String username) {
-        List<Map<String, Object>> rows = jdbc.sql("""
-                        SELECT oi2.product_id AS pid, COUNT(*) AS freq
-                        FROM order_item oi1
-                        JOIN mall_order o1 ON o1.id = oi1.order_id AND o1.status = 'PAID'
-                        JOIN order_item oi2 ON oi2.order_id = oi1.order_id AND oi2.product_id <> oi1.product_id
-                        WHERE oi1.product_id IN (:seeds)
-                        GROUP BY oi2.product_id
-                        ORDER BY freq DESC, oi2.product_id""")
+        // LIMIT 取 size 的两倍：picked 里可能已有前面路径占掉的编号，
+        // 留一点余量才不会因为几条重复就填不满 size。真正的上限还是 out 的长度。
+        List<ProductView> candidates = jdbc.sql("""
+                        SELECT p.id, p.name, p.description, p.category, p.illustration, p.price, p.stock, p.merchant_id
+                        FROM (SELECT oi2.product_id AS pid, COUNT(*) AS freq
+                              FROM order_item oi1
+                              JOIN mall_order o1 ON o1.id = oi1.order_id AND o1.status = 'PAID'
+                              JOIN order_item oi2 ON oi2.order_id = oi1.order_id
+                                                 AND oi2.product_id <> oi1.product_id
+                              WHERE oi1.product_id IN (:seeds) AND oi2.product_id NOT IN (:seeds)
+                              GROUP BY oi2.product_id) t
+                        JOIN product p ON p.id = t.pid AND p.stock > 0
+                        ORDER BY t.freq DESC, p.id
+                        LIMIT :limit""")
                 .param("seeds", new ArrayList<>(seeds))
-                .query((rs, rowNum) -> Map.of("pid", (Object) rs.getLong("pid"),
-                        "freq", (Object) rs.getInt("freq"))).list();
-        for (Map<String, Object> row : rows) {
+                .param("limit", size * 2)
+                .query(ProductView.class).list();
+        for (ProductView product : candidates) {
             if (out.size() >= size) return;
-            long pid = (Long) row.get("pid");
-            if (seeds.contains(pid) || !picked.add(pid)) continue;
-            ProductView product = productOrNull(pid);
-            if (product == null || product.stock() <= 0) continue;
+            if (!picked.add(product.id())) continue;
             out.add(toRelated(product, REASON_CO_PURCHASE));
         }
     }
@@ -128,7 +137,8 @@ public class RelatedRecommendationService {
     /** 路径 B：同类补充。种子商品所属品类里，还没买过/没在袋子里、且有货的。 */
     private void addSameCategory(List<RelatedProduct> out, Set<Long> picked, Set<Long> seeds,
                                  int size, String username) {
-        Set<String> categories = seeds.stream().map(this::productOrNull).filter(p -> p != null)
+        // 种子商品的品类一次批量取回来（原来是每个种子一条 SQL）。
+        Set<String> categories = catalog.findByIds(new ArrayList<>(seeds)).stream()
                 .map(ProductView::category).filter(c -> c != null && !c.isBlank())
                 .collect(Collectors.toCollection(LinkedHashSet::new));
         if (categories.isEmpty()) return;
@@ -138,9 +148,9 @@ public class RelatedRecommendationService {
         // 全部有货商品」都读出来（目录 5 万件、某个品类占一半就是 2.5 万行），
         // 然后在 Java 里扔掉前 5 件之外的一切。
         List<ProductView> candidates = jdbc.sql("""
-                        SELECT id, name, description, category, illustration, price, stock FROM product
+                        SELECT id, name, description, category, illustration, price, stock, merchant_id FROM product
                         WHERE category IN (:cats) AND stock > 0 AND id NOT IN (:seeds)
-                        ORDER BY price
+                        ORDER BY price, id
                         LIMIT :limit""")
                 .param("cats", ordered).param("seeds", seedList).param("limit", size)
                 .query(ProductView.class).list();
@@ -154,7 +164,7 @@ public class RelatedRecommendationService {
     /** 兜底：没有历史时给最热销的，而不是给一个空列表。 */
     private void addPopular(List<RelatedProduct> out, Set<Long> picked, int size, String username) {
         List<ProductView> candidates = jdbc.sql("""
-                        SELECT p.id, p.name, p.description, p.category, p.illustration, p.price, p.stock
+                        SELECT p.id, p.name, p.description, p.category, p.illustration, p.price, p.stock, p.merchant_id
                         FROM product p LEFT JOIN order_item i ON i.product_id = p.id
                         LEFT JOIN mall_order o ON o.id = i.order_id AND o.status = 'PAID'
                         WHERE p.stock > 0
@@ -165,15 +175,6 @@ public class RelatedRecommendationService {
         for (ProductView product : candidates) {
             if (!picked.add(product.id())) continue;
             out.add(toRelated(product, REASON_POPULAR));
-        }
-    }
-
-    private ProductView productOrNull(long id) {
-        try {
-            return catalog.get(id);
-        } catch (RuntimeException e) {
-            // 商品已下架：推荐里静默跳过，别让一条脏数据把整个推荐打挂。
-            return null;
         }
     }
 

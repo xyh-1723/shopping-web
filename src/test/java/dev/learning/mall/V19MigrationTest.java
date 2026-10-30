@@ -148,7 +148,7 @@ class V19MigrationTest {
         String url = TestH2.inMemory("v19-replay-" + UUID.randomUUID());
         SimpleDriverDataSource replay = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
         try {
-            Flyway.configure().dataSource(replay).locations("classpath:db/migration")
+            Flyway.configure().dataSource(replay).locations("classpath:db/migration", "classpath:db/dev-seed")
                     .target("19").load().migrate();
 
             int notificationLength = lengthOn(replay, "NOTIFICATION", "CONTENT");

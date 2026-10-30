@@ -20,9 +20,12 @@
       <nav aria-label="主导航">
         <button class="nav-link active" data-view="shop">逛逛商品</button
         ><button class="nav-link" data-view="orders">我的订单</button
+        ><button class="nav-link" data-view="coupons">优惠券</button
         ><button class="nav-link" data-view="messages">
           消息中心<span class="nav-dot"></span></button
         ><a class="nav-link" href="/assistant">购物助手 ✦</a
+        ><a class="nav-link" th:if="${merchantCenter}" href="/merchant"
+          >商家中心 ↗</a
         ><a class="nav-link" href="/learn">学习地图 ↗</a>
       </nav>
       <div class="account">
@@ -100,10 +103,28 @@
             <div id="cart-items"></div>
             <div class="cart-summary">
               <div>
-                <span>商品合计</span><strong id="cart-total">¥0.00</strong>
+                <span>商品小计</span><strong id="cart-subtotal">¥0.00</strong>
+              </div>
+              <div id="cart-promotion-line" class="subtle hidden">
+                <span>满减优惠</span><span id="cart-promotion"></span>
               </div>
               <div class="subtle">
-                <span>配送费用</span><span>学习演示 · 免运费</span>
+                <span>配送费用</span><span id="cart-shipping">下单时计算</span>
+              </div>
+              <!-- 选券放在这里而不是结算页：用户调整购物袋时就能看到券后金额，
+                   不用提交到一半才发现门槛不够。 -->
+              <div class="coupon-pick">
+                <span>优惠券</span>
+                <select id="coupon-select" aria-label="选择优惠券" disabled>
+                  <option value="">暂无可用券</option>
+                </select>
+              </div>
+              <div id="cart-coupon-line" class="coupon-line hidden">
+                <span>券减免</span><span id="cart-coupon"></span>
+              </div>
+              <p class="subtle" id="coupon-hint"></p>
+              <div class="cart-total-line">
+                <span>应付</span><strong id="cart-total">¥0.00</strong>
               </div>
             </div>
             <button id="checkout" class="button green wide" disabled>
@@ -138,6 +159,26 @@
              放在订单区正好与「选支付方式」这个动作挨着。 -->
         <div id="wallet" class="wallet-strip hidden"></div>
         <div id="orders" class="order-list"></div>
+      </section>
+      <section id="coupons-view" class="view hidden">
+        <div class="page-heading">
+          <div>
+            <span class="eyebrow muted">COUPONS</span>
+            <h1>优惠券</h1>
+            <p>平台券由平台与商家共担，店铺券由商家承担；一笔订单最多用一张。</p>
+          </div>
+        </div>
+        <div class="info-strip">
+          平台补贴不超过本单佣金，商家承担不超过本店商品金额的 35%——两头都有上限，券才发得久。
+        </div>
+        <section>
+          <h2>可领取</h2>
+          <div id="coupon-available" class="order-list"></div>
+        </section>
+        <section>
+          <h2>我的券</h2>
+          <div id="coupon-mine" class="order-list"></div>
+        </section>
       </section>
       <section id="messages-view" class="view hidden">
         <div class="page-heading">

@@ -25,7 +25,7 @@ public class CatalogScaleCheck {
         }
 
         var r = Flyway.configure().dataSource(source)
-                .locations("filesystem:src/main/resources/db/migration").load().migrate();
+                .locations("filesystem:src/main/resources/db/migration", "filesystem:src/main/resources/db/dev-seed").load().migrate();
         System.out.println("迁移成功：" + r.migrationsExecuted + " 个，最终版本 " + r.targetSchemaVersion);
 
         try (Connection c = source.getConnection(); Statement s = c.createStatement()) {

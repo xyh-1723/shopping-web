@@ -49,7 +49,9 @@ public class MemoryStore {
         return jdbc.sql("SELECT memory_key, memory_value, source, confidence, updated_at " +
                         "FROM assistant_user_memory " +
                         "WHERE username = :user AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP) " +
-                        "ORDER BY updated_at DESC")
+                        // 次排序键 memory_key：一轮对话可能同时刷新多条记忆，
+                        // 它们的 updated_at 会撞在同一毫秒上，没有它「这次记住了什么」的顺序不稳定。
+                        "ORDER BY updated_at DESC, memory_key")
                 .param("user", username).query(ENTRY_MAPPER).list();
     }
 

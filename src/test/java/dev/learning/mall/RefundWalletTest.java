@@ -99,7 +99,7 @@ class RefundWalletTest {
         OrderView paid = payWithWallet(u);
         assertThat(WalletProbe.balanceCents(jdbc, u)).isEqualTo(grant() - ORDER_CENTS);
 
-        RefundView refund = refunds.apply(paid.id(), u, null, "NO_REASON", null);
+        RefundView refund = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "NO_REASON", null);
 
         assertThat(refund.status()).isEqualTo(RefundView.STATUS_REFUNDED);
         assertThat(refund.route()).isEqualTo(RefundView.ROUTE_AUTO);
@@ -125,7 +125,7 @@ class RefundWalletTest {
         String u = user("actor-auto");
         OrderView paid = payWithWallet(u);
 
-        RefundView refund = refunds.apply(paid.id(), u, null, null, null);
+        RefundView refund = refunds.apply(paid.id(), SubOrders.only(paid), u, null, null, null);
         assertThat(refund.decidedBy()).isEqualTo("SYSTEM");
 
         assertThat(refundActorOf(u))
@@ -140,9 +140,9 @@ class RefundWalletTest {
     void merchantApprovalActorIsTheApprover() {
         String u = user("actor-merchant");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-ACTOR-1");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-ACTOR-1");
 
-        RefundView queued = refunds.apply(paid.id(), u, null, "WRONG_ITEM", "发错款式");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "WRONG_ITEM", "发错款式");
         assertThat(queued.route()).as("已发货必须等商家").isEqualTo(RefundView.ROUTE_MERCHANT_APPROVAL);
 
         RefundView refunded = refunds.approve(queued.id(), MERCHANT, "核实后同意");
@@ -159,8 +159,8 @@ class RefundWalletTest {
     void approvingWithoutMerchantRoleIsForbidden() {
         String u = user("actor-forbidden");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-ACTOR-2");
-        RefundView queued = refunds.apply(paid.id(), u, null, null, null);
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-ACTOR-2");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, null, null);
 
         for (String intruder : List.of(u, "admin", "ghost-account")) {
             BusinessException denied = catchThrowableOfType(
@@ -192,7 +192,7 @@ class RefundWalletTest {
         int stockBefore = stockOf();
 
         BusinessException rejected = catchThrowableOfType(
-                () -> refunds.apply(paid.id(), u, null, null, null), BusinessException.class);
+                () -> refunds.apply(paid.id(), SubOrders.only(paid), u, null, null, null), BusinessException.class);
 
         assertThat(rejected).as("没有资金落点的退款必须报错，不能静默成功").isNotNull();
         assertThat(rejected.code()).isEqualTo("REFUND_UNSUPPORTED");

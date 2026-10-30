@@ -15,7 +15,7 @@ class ProductRepository {
      * {@link ProductView} 的按名映射多出一个对不上的字段，届时报错离出错点很远。
      */
     private static final String COLUMNS =
-            "id, name, description, category, illustration, price, stock";
+            "id, name, description, category, illustration, price, stock, merchant_id";
 
     private final JdbcClient jdbc;
     ProductRepository(JdbcClient jdbc) { this.jdbc = jdbc; }
@@ -26,16 +26,46 @@ class ProductRepository {
      * "参数未绑定"，不会静默查错。
      */
     ProductPage search(ProductQuery query) {
-        String where = where(query);
-        long total = bind(jdbc.sql("SELECT COUNT(*) FROM product" + where), query)
+        return search(query, null);
+    }
+
+    /**
+     * 分页查商品；{@code merchantId} 不为 null 时只看这一家店的货。
+     *
+     * <p>店铺条件作为<b>服务端参数</b>传进来，而不是从 {@link ProductQuery} 里读：
+     * 后者会随 HTTP 参数一起流动，等于允许调用方自己声明「我是几号店」。
+     */
+    ProductPage search(ProductQuery query, Long merchantId) {
+        String where = where(query, merchantId);
+        long total = bind(jdbc.sql("SELECT COUNT(*) FROM product" + where), query, merchantId)
                 .query(Long.class).single();
         String sql = "SELECT " + COLUMNS + " FROM product" + where
                 + " ORDER BY " + orderBy(query.sort()) + " LIMIT :limit OFFSET :offset";
-        List<ProductView> items = bind(jdbc.sql(sql), query)
+        List<ProductView> items = bind(jdbc.sql(sql), query, merchantId)
                 .param("limit", query.size())
                 .param("offset", query.offset())
                 .query(ProductView.class).list();
         return new ProductPage(items, total, query.page(), query.size());
+    }
+
+    /**
+     * 一家店的库存概览。三个指标一条 SQL 取齐（理由见 {@link MerchantStockSummary}），
+     * 并且<b>不受分页影响</b>——它回答的是整家店，不是当前这一页。
+     */
+    MerchantStockSummary summaryOfMerchant(long merchantId) {
+        return jdbc.sql("SELECT COUNT(*) AS product_count,"
+                        + " COALESCE(SUM(stock), 0) AS stock_total,"
+                        + " COALESCE(SUM(CASE WHEN stock = 0 THEN 1 ELSE 0 END), 0) AS out_of_stock_count"
+                        + " FROM product WHERE merchant_id = :merchant")
+                .param("merchant", merchantId)
+                .query(MerchantStockSummary.class).single();
+    }
+
+    /**
+     * 全站售罄（stock = 0）的商品种数——D2 的 {@code mall.catalog.sold_out} Gauge 每次读数时调用。
+     */
+    long soldOutCount() {
+        return jdbc.sql("SELECT COUNT(*) FROM product WHERE stock = 0").query(Long.class).single();
     }
 
     /**
@@ -50,9 +80,9 @@ class ProductRepository {
      */
     List<ProductView> sampleAcrossCategories(int perCategory, int limit) {
         List<ProductView> picked = jdbc.sql("""
-                        SELECT id, name, description, category, illustration, price, stock FROM (
+                        SELECT id, name, description, category, illustration, price, stock, merchant_id FROM (
                             SELECT p.id, p.name, p.description, p.category, p.illustration,
-                                   p.price, p.stock,
+                                   p.price, p.stock, p.merchant_id,
                                    ROW_NUMBER() OVER (PARTITION BY p.category ORDER BY p.price, p.id) AS rn
                               FROM product p
                         ) ranked
@@ -94,6 +124,13 @@ class ProductRepository {
         return jdbc.sql("SELECT " + COLUMNS + " FROM product WHERE id = :id")
                 .param("id", id).query(ProductView.class).optional();
     }
+
+    /** 按一批编号取商品。空入参直接返回空表，避免生成 {@code IN ()} 这种非法 SQL。 */
+    List<ProductView> findAll(List<Long> ids) {
+        if (ids.isEmpty()) return List.of();
+        return jdbc.sql("SELECT " + COLUMNS + " FROM product WHERE id IN (:ids)")
+                .param("ids", ids).query(ProductView.class).list();
+    }
     int deduct(long id, int quantity) {
         // 条件判断和扣减是同一条 SQL；不要先查库存再无条件扣减。
         return jdbc.sql("UPDATE product SET stock = stock - :qty WHERE id = :id AND stock >= :qty")
@@ -110,21 +147,24 @@ class ProductRepository {
     }
 
     /** 拼 WHERE 子句（无条件时返回空串）。条件集合必须与 {@link #bind} 完全一致。 */
-    private static String where(ProductQuery q) {
+    private static String where(ProductQuery q, Long merchantId) {
         List<String> conditions = new ArrayList<>();
         if (q.keyword() != null)
             conditions.add("(LOWER(name) LIKE :kw ESCAPE '!' OR LOWER(description) LIKE :kw ESCAPE '!')");
         if (q.category() != null) conditions.add("category = :cat");
         if (q.maxPrice() != null) conditions.add("price <= :maxPrice");
         if (q.inStockOnly()) conditions.add("stock > 0");
+        if (merchantId != null) conditions.add("merchant_id = :merchant");
         return conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions);
     }
 
     /** 绑定 {@link #where} 里出现的参数。两处条件判断一一对应，缺一个会直接抛"参数未绑定"。 */
-    private static JdbcClient.StatementSpec bind(JdbcClient.StatementSpec spec, ProductQuery q) {
+    private static JdbcClient.StatementSpec bind(
+            JdbcClient.StatementSpec spec, ProductQuery q, Long merchantId) {
         if (q.keyword() != null) spec = spec.param("kw", likePattern(q.keyword()));
         if (q.category() != null) spec = spec.param("cat", q.category());
         if (q.maxPrice() != null) spec = spec.param("maxPrice", q.maxPrice());
+        if (merchantId != null) spec = spec.param("merchant", merchantId);
         return spec;
     }
 

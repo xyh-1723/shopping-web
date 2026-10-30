@@ -28,7 +28,7 @@ public class CartPricing implements Pricer {
     }
 
     @Override
-    public Quote quote(List<Line> lines) {
+    public Quote quote(List<Line> lines, BigDecimal couponDiscount) {
         if (lines.isEmpty()) {
             return new Quote(scale(BigDecimal.ZERO), scale(BigDecimal.ZERO), scale(BigDecimal.ZERO),
                     scale(BigDecimal.ZERO), List.of());
@@ -48,8 +48,16 @@ public class CartPricing implements Pricer {
                 break;
             }
         }
-        BigDecimal discount = scale(applied == null ? BigDecimal.ZERO : applied.discount());
+        BigDecimal promotionDiscount = scale(applied == null ? BigDecimal.ZERO : applied.discount());
+        BigDecimal coupon = scale(couponDiscount == null ? BigDecimal.ZERO : couponDiscount);
+        BigDecimal goodsAfterPromotion = subtotal.subtract(promotionDiscount);
+        if (coupon.signum() < 0 || coupon.compareTo(goodsAfterPromotion) > 0) {
+            // 券减免由优惠券模块计算，正常不会越界；越界说明上游有 bug，不能悄悄截断。
+            throw new IllegalArgumentException("优惠券减免不能为负，也不能超过券前折后商品金额：" + coupon);
+        }
+        BigDecimal discount = scale(promotionDiscount.add(coupon));
         // 包邮按「折后金额」判断：用户感知的门槛就是实际付的金额，而不是被优惠抬高的原价。
+        // 券也是折扣，所以这里必须把 coupon 一起扣掉，再判断是否包邮。
         BigDecimal afterDiscount = subtotal.subtract(discount);
         BigDecimal freeShipping = properties.getFreeShippingThreshold();
         boolean freeShip = afterDiscount.compareTo(freeShipping) >= 0;
@@ -59,6 +67,9 @@ public class CartPricing implements Pricer {
         List<String> notes = new ArrayList<>();
         if (applied != null) {
             notes.add("已享满 " + plain(applied.threshold()) + " 减 " + plain(applied.discount()));
+        }
+        if (coupon.signum() > 0) {
+            notes.add("优惠券再减 " + plain(coupon) + " 元");
         }
         if (!freeShip) {
             notes.add("还差 " + plain(freeShipping.subtract(afterDiscount)) + " 元包邮（当前运费 "

@@ -117,7 +117,7 @@ class MerchantToolsTest {
         AssistantActor merchant = actors.resolve(shopOwner);
         String u = buyer("queue");
         OrderView paid = payWithWallet(u);
-        RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "不想要了");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "OTHER", "不想要了");
 
         ToolRegistry.Bundle bundle = registry.forActor(merchant);
         List<String> visible = bundle.specs().stream().map(ToolSpecification::name).toList();
@@ -142,7 +142,7 @@ class MerchantToolsTest {
         AssistantActor merchant = actors.resolve(shopOwner);
         String u = buyer("approve");
         OrderView paid = payWithWallet(u);
-        RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "发错货了");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "OTHER", "发错货了");
         long expectedCents = MoneyUnits.toCents(paid.payAmount());
         long before = WalletProbe.balanceCents(jdbc, u);
         int stockBefore = stockOf();
@@ -173,7 +173,7 @@ class MerchantToolsTest {
         AssistantActor merchant = actors.resolve(shopOwner);
         String u = buyer("reject");
         OrderView paid = payWithWallet(u);
-        RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "拍错了");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "OTHER", "拍错了");
         long before = WalletProbe.balanceCents(jdbc, u);
         int stockBefore = stockOf();
 
@@ -195,7 +195,7 @@ class MerchantToolsTest {
     void customerIsDeniedInsideTheToolMethod() {
         String u = buyer("deny-user");
         OrderView paid = payWithWallet(u);
-        RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "不想要了");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "OTHER", "不想要了");
         AssistantActor customer = actors.resolve(CUSTOMER);
         long before = WalletProbe.balanceCents(jdbc, u);
 
@@ -242,7 +242,7 @@ class MerchantToolsTest {
     void staffSeesQueueButCannotDecide() {
         String u = buyer("staff");
         OrderView paid = payWithWallet(u);
-        RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "不想要了");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "OTHER", "不想要了");
         AssistantActor staff = actors.resolve(STAFF);
 
         assertThat(staff.isStaff()).isTrue();

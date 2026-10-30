@@ -122,6 +122,9 @@ public class MerchantTools {
         ObjectNode node = json.createObjectNode();
         node.put("id", view.id());
         node.put("orderId", view.orderId());
+        // 子订单号 = 这笔钱属于哪家店。它必须回给模型：商家问「我刚批的是哪家的」
+        // 时，只有这个号能回答，订单号不能——跨店订单下一笔订单对应多家店。
+        node.put("subOrderId", view.orderSubId());
         node.put("username", view.username());
         node.put("amount", view.amount());
         node.put("status", view.status());

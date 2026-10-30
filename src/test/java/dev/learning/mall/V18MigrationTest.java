@@ -162,7 +162,7 @@ class V18MigrationTest {
         String url = TestH2.inMemory("v18-replay-" + UUID.randomUUID());
         SimpleDriverDataSource replay = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
         try {
-            Flyway.configure().dataSource(replay).locations("classpath:db/migration")
+            Flyway.configure().dataSource(replay).locations("classpath:db/migration", "classpath:db/dev-seed")
                     .target("18").load().migrate();
 
             try (Connection c = replay.getConnection();
@@ -182,13 +182,19 @@ class V18MigrationTest {
 
     // ——————————————————— 工具 ———————————————————
 
-    /** 插一行退款；订单号按 id 派生，免得同订单两笔在途撞上 uq_refund_inflight。 */
+    /**
+     * 插一行退款；订单号按 id 派生，免得同订单两笔在途撞上 uq_refund_inflight。
+     *
+     * <p>V25 起 {@code order_sub_id} 是 NOT NULL，且 {@code in_flight} 生成列装的是它——
+     * 子订单号同样按 id 派生（该列无外键，合成值即可），碰撞口径与派生订单号完全一致。
+     */
     private int insertRefund(String id, String reasonCode) {
-        return jdbc.sql("INSERT INTO refund(id,order_id,username,amount,reason_code,route,status,"
+        return jdbc.sql("INSERT INTO refund(id,order_id,order_sub_id,username,amount,reason_code,route,status,"
                         + "requested_by) "
-                        + "VALUES(:id,:order,:user,47.00,:code,'AUTO','PENDING_APPROVAL',:user)")
+                        + "VALUES(:id,:order,:sub,:user,47.00,:code,'AUTO','PENDING_APPROVAL',:user)")
                 .param("id", id)
                 .param("order", PROBE_ORDER_PREFIX + id)
+                .param("sub", PROBE_ORDER_PREFIX + id + "-S1")
                 .param("user", PROBE_USER)
                 .param("code", reasonCode)
                 .update();

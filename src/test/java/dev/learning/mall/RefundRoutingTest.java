@@ -115,10 +115,10 @@ class RefundRoutingTest {
     void shippedOrderRequiresMerchant() {
         String u = user("shipped");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-ROUTE-1");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-ROUTE-1");
         long stockBefore = stockOf(1);
 
-        RefundView refund = refunds.apply(paid.id(), u, null, "NO_REASON", "不想要了");
+        RefundView refund = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "NO_REASON", "不想要了");
 
         assertThat(refund.route()).as("货已出库就不能「点击即退」：这条是硬规则，不受配置影响")
                 .isEqualTo(RefundView.ROUTE_MERCHANT_APPROVAL);
@@ -155,7 +155,8 @@ class RefundRoutingTest {
         String u = user("threshold");
 
         // 基线：默认阈值（24 小时 / ¥200）下，¥47、刚支付的未发货订单是 AUTO。
-        assertThat(refunds.apply(payWithWallet(u).id(), u, null, null, null).route())
+        OrderView baseline = payWithWallet(u);
+        assertThat(refunds.apply(baseline.id(), SubOrders.only(baseline), u, null, null, null).route())
                 .as("用例前提：默认阈值下这笔走无理由退款")
                 .isEqualTo(RefundView.ROUTE_AUTO);
 
@@ -163,7 +164,7 @@ class RefundRoutingTest {
         OrderView amountCase = payWithWallet(u);
         RefundView overCap;
         try (Thresholds ignored = thresholds(24, new BigDecimal("1.00"))) {
-            overCap = refunds.apply(amountCase.id(), u, null, null, null);
+            overCap = refunds.apply(amountCase.id(), SubOrders.only(amountCase), u, null, null, null);
         }
         assertThat(overCap.route()).as("金额阈值必须是配出来的，不是写死在代码里的 200")
                 .isEqualTo(RefundView.ROUTE_MERCHANT_APPROVAL);
@@ -174,7 +175,7 @@ class RefundRoutingTest {
         //    计的是 paid_at，不是 created_at。
         OrderView staleCase = payWithWallet(u);
         at(BASE.plusHours(25));
-        assertThat(refunds.apply(staleCase.id(), u, null, null, null).route())
+        assertThat(refunds.apply(staleCase.id(), SubOrders.only(staleCase), u, null, null, null).route())
                 .as("超过 24 小时就不该还能自助退（按支付时刻计）")
                 .isEqualTo(RefundView.ROUTE_MERCHANT_APPROVAL);
 
@@ -189,7 +190,7 @@ class RefundRoutingTest {
         at(BASE.plusHours(25));
         RefundView wide;
         try (Thresholds ignored = thresholds(48, new BigDecimal("200.00"))) {
-            wide = refunds.apply(widened.id(), u, null, null, null);
+            wide = refunds.apply(widened.id(), SubOrders.only(widened), u, null, null, null);
         }
         assertThat(wide.route()).as("窗口是配出来的，把它放宽应当立刻生效")
                 .isEqualTo(RefundView.ROUTE_AUTO);
@@ -212,7 +213,7 @@ class RefundRoutingTest {
         String u = user("auto");
         OrderView paid = payWithWallet(u);
 
-        RefundView refund = refunds.apply(paid.id(), u, null, null, null);
+        RefundView refund = refunds.apply(paid.id(), SubOrders.only(paid), u, null, null, null);
 
         assertThat(refund.route()).isEqualTo(RefundView.ROUTE_AUTO);
         assertThat(refund.status()).isEqualTo(RefundView.STATUS_REFUNDED);
@@ -243,7 +244,7 @@ class RefundRoutingTest {
         long stockBefore = stockOf(1);
 
         BusinessException rejected = catchThrowableOfType(
-                () -> refunds.apply(paid.id(), u, new BigDecimal("100.00"), null, null),
+                () -> refunds.apply(paid.id(), SubOrders.only(paid), u, new BigDecimal("100.00"), null, null),
                 BusinessException.class);
 
         assertThat(rejected).as("超额退款必须是一次说得清的 409").isNotNull();
@@ -268,7 +269,7 @@ class RefundRoutingTest {
 
         try (TurnScope.Scope ignored = TurnScope.begin(conversation, "intruder")) {
             BusinessException denied = catchThrowableOfType(
-                    () -> pendingActions.requestOrderRefund("intruder", paid.id(), null, null, null),
+                    () -> pendingActions.requestOrderRefund("intruder", paid.id(), SubOrders.only(paid), null, null, null),
                     BusinessException.class);
             assertThat(denied).isNotNull();
             assertThat(denied.code()).as("别人的订单：404，且不泄露它存在").isEqualTo("NOT_FOUND");
@@ -277,7 +278,7 @@ class RefundRoutingTest {
         assertThat(countRefunds(paid.id())).as("越权请求零副作用").isZero();
 
         // 正向控制：本人发起 → 拿到待确认卡片（此时还没退钱）→ 本人确认 → 真的退了。
-        var card = pendingActions.requestOrderRefund(u, paid.id(), null, null, null);
+        var card = pendingActions.requestOrderRefund(u, paid.id(), SubOrders.only(paid), null, null, null);
         assertThat(card.kind()).isEqualTo(PendingActionService.KIND_ORDER_REFUND);
         assertThat(card.orderId()).isEqualTo(paid.id());
         assertThat(card.amount()).isEqualByComparingTo(ORDER_AMOUNT);
@@ -299,11 +300,11 @@ class RefundRoutingTest {
     void secondRefundWhileOneIsInFlightIsRejectedCleanly() {
         String u = user("inflight");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-ROUTE-2");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-ROUTE-2");
 
-        refunds.apply(paid.id(), u, null, "NO_REASON", null);
+        refunds.apply(paid.id(), SubOrders.only(paid), u, null, "NO_REASON", null);
         BusinessException second = catchThrowableOfType(
-                () -> refunds.apply(paid.id(), u, null, "NO_REASON", null), BusinessException.class);
+                () -> refunds.apply(paid.id(), SubOrders.only(paid), u, null, "NO_REASON", null), BusinessException.class);
 
         assertThat(second).isNotNull();
         assertThat(second.code()).isEqualTo("ALREADY_RESOLVED");
@@ -318,7 +319,7 @@ class RefundRoutingTest {
         properties.getRefund().setEnabled(false);
         try {
             BusinessException rejected = catchThrowableOfType(
-                    () -> refunds.apply(paid.id(), u, null, null, null), BusinessException.class);
+                    () -> refunds.apply(paid.id(), SubOrders.only(paid), u, null, null, null), BusinessException.class);
             assertThat(rejected).isNotNull();
             assertThat(rejected.code()).isEqualTo("REFUND_DISABLED");
         } finally {

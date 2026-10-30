@@ -127,7 +127,7 @@ class NotificationLifecycleTrailTest {
     void shippedEventLeavesATrail() {
         String user = user("ship");
         OrderView paid = payWithWallet(user);
-        fulfillment.ship(paid.id(), "admin", "SF-T15-LIFE");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-T15-LIFE");
 
         consume(paid.id(), "ORDER_SHIPPED");
 
@@ -143,8 +143,8 @@ class NotificationLifecycleTrailTest {
     void receivedEventLeavesATrail() {
         String user = user("recv");
         OrderView paid = payWithWallet(user);
-        fulfillment.ship(paid.id(), "admin", "SF-T15-RECV");
-        fulfillment.receive(paid.id(), user);
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-T15-RECV");
+        fulfillment.receive(SubOrders.only(paid), user);
 
         consume(paid.id(), "ORDER_RECEIVED");
 
@@ -159,7 +159,7 @@ class NotificationLifecycleTrailTest {
         String user = user("refund");
         OrderView paid = payWithWallet(user);
 
-        RefundView refund = refunds.apply(paid.id(), user, null, "NO_REASON", null);
+        RefundView refund = refunds.apply(paid.id(), SubOrders.only(paid), user, null, "NO_REASON", null);
         // 先确认走的是「自动放款」这条路：只有它才在同一笔里直接发 ORDER_REFUNDED。
         // 若将来分流规则变了（变成要商家批），这条会红而不是悄悄变成「没有留痕」。
         assertThat(refund.route()).isEqualTo(RefundView.ROUTE_AUTO);
@@ -180,9 +180,9 @@ class NotificationLifecycleTrailTest {
     void refundRequestedEventLeavesATrail() {
         String user = user("request");
         OrderView paid = payWithWallet(user);
-        fulfillment.ship(paid.id(), "admin", "SF-T15-REQ");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-T15-REQ");
 
-        RefundView refund = refunds.apply(paid.id(), user, null, "NO_REASON", null);
+        RefundView refund = refunds.apply(paid.id(), SubOrders.only(paid), user, null, "NO_REASON", null);
         assertThat(refund.route()).as("货已出门就必须等商家批，于是才有 REFUND_REQUESTED 这条事件")
                 .isEqualTo(RefundView.ROUTE_MERCHANT_APPROVAL);
 

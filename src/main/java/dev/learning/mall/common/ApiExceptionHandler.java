@@ -45,6 +45,15 @@ public class ApiExceptionHandler {
         return ResponseEntity.status(409).body(Map.of("code", "BUSY", "message", "系统繁忙，请用原请求编号重试"));
     }
     /**
+     * 改密时旧密码不对。{@code JdbcUserDetailsManager.changePassword} 抛这个异常，
+     * 不接住就掉进兜底变 500——旧密码错是用户输入问题，该是 4xx。
+     */
+    @ExceptionHandler(org.springframework.security.authentication.BadCredentialsException.class)
+    public ResponseEntity<?> badCredentials(org.springframework.security.authentication.BadCredentialsException e) {
+        return ResponseEntity.badRequest()
+                .body(Map.of("code", "OLD_PASSWORD_WRONG", "message", "旧密码不正确"));
+    }
+    /**
      * 助手线程池队列溢出。这是「服务端此刻没有容量」，不是「请求有问题」——
      * 必须如实返回 503（可重试），而不是被兜底成 500 让调用方以为代码出错了。
      */

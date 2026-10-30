@@ -39,6 +39,13 @@ import org.springframework.test.context.ActiveProfiles;
  *   <li>迁移里的<b>语句顺序</b>：加列 → 回填 → 加约束 → 加索引。顺序反了，
  *       存量 PAID 行会自己把迁移顶回去（§2.5）。</li>
  * </ul>
+ *
+ * <p><b>V25 之后</b>：履约状态机（列 + 两条 {@code ck_*_fulfillment_*} 约束）从
+ * {@code mall_order} 搬到了 {@code order_sub}，本文件的探针跟着指到子订单；
+ * 「钱到账才配货」不再是 CHECK（跨表条件没有 CHECK 可写），
+ * 改由 {@link #unpaidOrderCannotEnterFulfillment} 以「影响 0 行」的形状守。
+ * 历史重放用例（{@link #scriptAddsConstraintsAfterBackfill}）停在 V15 那一刻的库上，
+ * 那里约束当然还在 {@code mall_order} ——它验的是迁移本身，不是现状。</p>
  */
 @SpringBootTest
 @ActiveProfiles("test")
@@ -50,19 +57,33 @@ class V15MigrationTest {
     @Autowired JdbcClient jdbc;
 
     @Test
-    @DisplayName("履约八列与四条显式命名约束都在")
+    @DisplayName("履约七列与显式命名约束都在（V25 起在 ORDER_SUB 上）；父单只剩支付时刻那一套")
     void fulfillmentColumnsAndNamedConstraintsArePresent() {
-        assertThat(columnsOf("MALL_ORDER")).contains("PAID_AT", "FULFILLMENT_STATUS", "SHIPPED_AT",
+        // V25 把履约整套从 mall_order 搬到了 order_sub（一车三家的货各发各的，
+        // 父单上不存在能成立的值），本断言跟着列的新住址走。
+        assertThat(columnsOf("ORDER_SUB")).contains("FULFILLMENT_STATUS", "SHIPPED_AT",
                 "SHIPPED_BY", "SHIPPING_NO", "RECEIVED_AT", "COMPLETED_AT", "AUTO_RECEIVE_AT");
+        assertThat(columnsOf("MALL_ORDER")).contains("PAID_AT")
+                .as("履约字段在父单上必须已经下线，否则「父单只管钱、子单管货」分叉成两处真相")
+                .doesNotContain("FULFILLMENT_STATUS", "SHIPPED_AT", "RECEIVED_AT", "COMPLETED_AT");
+
+        Set<String> subNames = constraintNames("ORDER_SUB");
+        assertThat(subNames).contains("CK_SUB_FULFILLMENT_STATUS", "CK_SUB_FULFILLMENT_FIELDS",
+                "CK_SUB_AMOUNTS");
+        // 「钱到账才配货」不再是 CHECK：它跨表（子单不知道父单的 status），SQL 没有跨表 CHECK，
+        // V25 把它写进了每条履约 UPDATE 的 WHERE（EXISTS 父单 PAID）——
+        // 那条规则由 unpaidOrderCannotEnterFulfillment 以「0 行」的形状守着。
+        assertThat(subNames).noneMatch(name -> name.contains("NEEDS_PAID"));
 
         Set<String> names = constraintNames("MALL_ORDER");
-        assertThat(names).contains("CK_ORDER_FULFILLMENT_STATUS", "CK_ORDER_FULFILLMENT_FIELDS",
-                "CK_ORDER_PAID_NEEDS_MOMENT", "CK_ORDER_FULFILLMENT_NEEDS_PAID");
+        assertThat(names).contains("CK_ORDER_PAID_NEEDS_MOMENT")
+                .doesNotContain("CK_ORDER_FULFILLMENT_STATUS", "CK_ORDER_FULFILLMENT_FIELDS",
+                        "CK_ORDER_FULFILLMENT_NEEDS_PAID");
 
         // 这里刻意不像 V14 那样断言「整张表没有 CONSTRAINT_ 前缀」：V1 的 status 与 total
         // 是内联 CHECK，H2 给它们的正是自动名，且方案 §2.2 决定不去动它（动它就得重建表）。
-        // V15 新增的这四条必须自己起名——上面 contains 就是这条保证。
-        assertThat(names).noneMatch(name -> name.startsWith("CONSTRAINT_") && name.contains("FULFILL"));
+        // 履约这套约束必须自己起名——上面 contains 就是这条保证。
+        assertThat(subNames).noneMatch(name -> name.startsWith("CONSTRAINT_") && name.contains("FULFILL"));
     }
 
     @Test
@@ -89,26 +110,26 @@ class V15MigrationTest {
     }
 
     @Test
-    @DisplayName("发货必须有发货时刻：裸 JDBC 把订单改成 SHIPPED 却不写 shipped_at，会被拒")
+    @DisplayName("发货必须有发货时刻：裸 JDBC 把子订单改成 SHIPPED 却不写 shipped_at，会被拒")
     void shippedOrderMustHaveMoment() {
         String id = insertOrder("v15-shipped-without-moment", "PENDING");
+        String subId = insertSub(id);
         try {
             jdbc.sql("UPDATE mall_order SET status='PAID', paid_at=:t WHERE id=:id")
                     .param("id", id).param("t", CREATED_AT.plusMinutes(3)).update();
 
-            assertThatThrownBy(() -> jdbc.sql("UPDATE mall_order SET fulfillment_status='SHIPPED',"
+            assertThatThrownBy(() -> jdbc.sql("UPDATE order_sub SET fulfillment_status='SHIPPED',"
                             + " shipping_no='SF123456' WHERE id=:id")
-                    .param("id", id).update())
-                    .hasMessageContaining("CK_ORDER_FULFILLMENT_FIELDS");
+                    .param("id", subId).update())
+                    .hasMessageContaining("CK_SUB_FULFILLMENT_FIELDS");
 
             // 状态没被改成一半：要么整条 UPDATE 生效，要么一行都不动。
-            assertThat(jdbc.sql("SELECT fulfillment_status FROM mall_order WHERE id=:id")
-                    .param("id", id).query(String.class).single()).isEqualTo("NONE");
+            assertThat(fulfillmentOf(subId)).isEqualTo("NONE");
 
             // 时刻写全就能过，同样是为了证明上面的红来自约束而不是 SQL。
-            assertThat(jdbc.sql("UPDATE mall_order SET fulfillment_status='SHIPPED', shipped_at=:t,"
+            assertThat(jdbc.sql("UPDATE order_sub SET fulfillment_status='SHIPPED', shipped_at=:t,"
                             + " shipping_no='SF123456' WHERE id=:id")
-                    .param("id", id).param("t", CREATED_AT.plusHours(1)).update()).isEqualTo(1);
+                    .param("id", subId).param("t", CREATED_AT.plusHours(1)).update()).isEqualTo(1);
         } finally {
             delete(id);
         }
@@ -118,25 +139,25 @@ class V15MigrationTest {
     @DisplayName("哨兵：fulfillment_status 的取值集合真的被 CHECK 拦着（不是空约束）")
     void fulfillmentStatusValueSetIsEnforced() {
         String id = insertOrder("v15-status-value-sentinel", "PAID");
+        String subId = insertSub(id);
         try {
             // 'DELIVERED' 看着像合法业务词，但它不在四值集合里——这类值最容易被人顺手加进来。
-            assertThatThrownBy(() -> jdbc.sql("UPDATE mall_order SET fulfillment_status='DELIVERED' WHERE id=:id")
-                    .param("id", id).update())
-                    .hasMessageContaining("CK_ORDER_FULFILLMENT_STATUS");
+            assertThatThrownBy(() -> jdbc.sql("UPDATE order_sub SET fulfillment_status='DELIVERED' WHERE id=:id")
+                    .param("id", subId).update())
+                    .hasMessageContaining("CK_SUB_FULFILLMENT_STATUS");
 
             // 四值集合里的每一个都必须能写进去，否则约束就是写窄了。
             for (String value : List.of("NONE", "SHIPPED", "RECEIVED", "COMPLETED")) {
-                jdbc.sql("UPDATE mall_order SET fulfillment_status=:s, shipped_at=:shipped,"
+                jdbc.sql("UPDATE order_sub SET fulfillment_status=:s, shipped_at=:shipped,"
                                 + " received_at=:received, completed_at=:completed WHERE id=:id")
-                        .param("id", id)
+                        .param("id", subId)
                         .param("s", value)
                         .param("shipped", "NONE".equals(value) ? null : CREATED_AT.plusHours(1))
                         .param("received", "SHIPPED".equals(value) || "NONE".equals(value)
                                 ? null : CREATED_AT.plusHours(2))
                         .param("completed", "COMPLETED".equals(value) ? CREATED_AT.plusHours(3) : null)
                         .update();
-                assertThat(jdbc.sql("SELECT fulfillment_status FROM mall_order WHERE id=:id")
-                        .param("id", id).query(String.class).single()).isEqualTo(value);
+                assertThat(fulfillmentOf(subId)).isEqualTo(value);
             }
         } finally {
             delete(id);
@@ -144,18 +165,30 @@ class V15MigrationTest {
     }
 
     @Test
-    @DisplayName("未支付的订单不能进入履约：fulfillment_status 想往前走，status 必须是 PAID")
+    @DisplayName("未支付的订单不能进入履约：V25 起这条不在 CHECK 里，而在写语句的 WHERE（EXISTS 父单 PAID）上")
     void unpaidOrderCannotEnterFulfillment() {
         String id = insertOrder("v15-unpaid-cannot-fulfill", "PENDING");
+        String subId = insertSub(id);
         try {
-            // shipped_at 一并写上：这样唯一能拒绝它的只有「未支付」这条，异常归因才干净。
-            assertThatThrownBy(() -> jdbc.sql("UPDATE mall_order SET fulfillment_status='SHIPPED',"
-                            + " shipped_at=:t WHERE id=:id")
-                    .param("id", id).param("t", CREATED_AT.plusHours(1)).update())
-                    .hasMessageContaining("CK_ORDER_FULFILLMENT_NEEDS_PAID");
+            // 「钱到账才配货」如今是每条履约 UPDATE 的 WHERE 条件（跨表条件没有 CHECK 可写）。
+            // 用与 OrderSubRepository.markShipped 同形的语句探它：父单没付钱 → 影响 0 行，
+            // 这就是新规制下「拒绝」的形状（不再是约束异常）。
+            int unpaid = jdbc.sql("UPDATE order_sub SET fulfillment_status='SHIPPED', shipped_at=:t"
+                            + " WHERE id=:id AND fulfillment_status='NONE'"
+                            + " AND EXISTS (SELECT 1 FROM mall_order o"
+                            + "              WHERE o.id = order_sub.order_id AND o.status='PAID')")
+                    .param("id", subId).param("t", CREATED_AT.plusHours(1)).update();
+            assertThat(unpaid).as("父单未支付时，发货 UPDATE 必须一行都够不到").isZero();
+            assertThat(fulfillmentOf(subId)).isEqualTo("NONE");
 
-            assertThat(jdbc.sql("SELECT fulfillment_status FROM mall_order WHERE id=:id")
-                    .param("id", id).query(String.class).single()).isEqualTo("NONE");
+            // 父单付了钱，同一条语句就够得到：证明上面的 0 行来自「未支付」而不是 SQL 写错。
+            jdbc.sql("UPDATE mall_order SET status='PAID', paid_at=:t WHERE id=:id")
+                    .param("id", id).param("t", CREATED_AT.plusMinutes(3)).update();
+            assertThat(jdbc.sql("UPDATE order_sub SET fulfillment_status='SHIPPED', shipped_at=:t"
+                            + " WHERE id=:id AND fulfillment_status='NONE'"
+                            + " AND EXISTS (SELECT 1 FROM mall_order o"
+                            + "              WHERE o.id = order_sub.order_id AND o.status='PAID')")
+                    .param("id", subId).param("t", CREATED_AT.plusHours(1)).update()).isEqualTo(1);
         } finally {
             delete(id);
         }
@@ -169,7 +202,7 @@ class V15MigrationTest {
         try {
             // 第一步：把库停在 V14。那一刻 mall_order 还没有 paid_at 这一列，
             // 于是「status='PAID' 且没有支付时刻」正是迁移前的真实存量形态。
-            Flyway.configure().dataSource(replay).locations("classpath:db/migration")
+            Flyway.configure().dataSource(replay).locations("classpath:db/migration", "classpath:db/dev-seed")
                     .target("14").load().migrate();
             try (Connection c = replay.getConnection();
                  PreparedStatement ps = c.prepareStatement("INSERT INTO mall_order"
@@ -184,7 +217,7 @@ class V15MigrationTest {
 
             // 第二步：只往前跑一格。若有人把回填挪到约束之后，上面这笔行会当场把迁移顶回去：
             // Check constraint violation: "CK_ORDER_PAID_NEEDS_MOMENT"
-            Flyway.configure().dataSource(replay).locations("classpath:db/migration")
+            Flyway.configure().dataSource(replay).locations("classpath:db/migration", "classpath:db/dev-seed")
                     .target("15").load().migrate();
 
             // 迁移成功还不够——那笔存量行必须真的被回填了，否则约束只是恰好没被触发。
@@ -218,7 +251,34 @@ class V15MigrationTest {
         return jdbc.sql("SELECT status FROM mall_order WHERE id=:id").param("id", id).query(String.class).single();
     }
 
+    /** 履约状态的新住址在子订单上（V25）。 */
+    private String fulfillmentOf(String subId) {
+        return jdbc.sql("SELECT fulfillment_status FROM order_sub WHERE id=:id")
+                .param("id", subId).query(String.class).single();
+    }
+
+    /**
+     * 给探针订单落一个子订单（履约探针的操作对象）。
+     *
+     * <p>{@code order_sub} 刻意没有指向 {@code mall_order} 的外键（V25），所以可以直接插；
+     * 它有指向 {@code merchant} 的外键，商家号从库里现查，不写死。
+     */
+    private String insertSub(String orderId) {
+        Long merchant = jdbc.sql("SELECT MIN(id) FROM merchant").query(Long.class).single();
+        assertThat(merchant).as("前提：库里有种子商家，order_sub 的外键才有落点").isNotNull();
+        String subId = orderId + "-S1";
+        // V27 给 order_sub 加了结算约束 merchant_income = pay_amount + platform_subsidy - platform_fee，
+        // 所以这里显式写上 merchant_income：无券、无补贴的订单，商家拿到的就是实付。
+        jdbc.sql("INSERT INTO order_sub(id, order_id, sub_seq, merchant_id,"
+                        + " subtotal, discount, shipping_fee, pay_amount, merchant_income)"
+                        + " VALUES (:id, :o, 1, :m, 320.00, 0, 0, 320.00, 320.00)")
+                .param("id", subId).param("o", orderId).param("m", merchant).update();
+        return subId;
+    }
+
     private void delete(String id) {
+        // order_sub 没有指向 mall_order 的外键，删订单带不走它，要自己清。
+        jdbc.sql("DELETE FROM order_sub WHERE order_id=:id").param("id", id).update();
         jdbc.sql("DELETE FROM mall_order WHERE id=:id").param("id", id).update();
     }
 

@@ -1,7 +1,9 @@
 package dev.learning.mall.merchant.api;
 
+import dev.learning.mall.common.BusinessException;
 import java.util.List;
 import java.util.Optional;
+import org.springframework.http.HttpStatus;
 
 /**
  * 「店」这个维度的唯一查询入口。
@@ -29,4 +31,20 @@ public interface MerchantDirectory {
      * 那两个字段是展示用的，不是身份。
      */
     Optional<MerchantView> ofOwner(String username);
+
+    /**
+     * 要求该账号有关联的店铺，否则抛 403。
+     *
+     * <p>这是「账号 → 店」解析的<b>唯一入口</b>：所有需要商家归属的地方都走这里，
+     * 不再各自写 {@code ofOwner(username).orElseThrow(...)}。
+     * 散落的 {@code orElseThrow} 最大的风险不是重复代码，而是<b>错误口径不一致</b>——
+     * 一处抛 403、一处抛 404、一处吞掉返回 null，前端就会对同一个根因给出三种表现。
+     *
+     * <p>错误码固定为 {@code MERCHANT_SHOP_MISSING}：「归属缺失按无权处理」，
+     * 不区分「真没店」和「账号角色不对」，免得把账号结构信息泄露给调用方。
+     */
+    default MerchantView requireShopOfOwner(String username) {
+        return ofOwner(username).orElseThrow(() -> new BusinessException(HttpStatus.FORBIDDEN,
+                "MERCHANT_SHOP_MISSING", "账号没有关联的店铺，无法执行此操作（归属缺失按无权处理）"));
+    }
 }

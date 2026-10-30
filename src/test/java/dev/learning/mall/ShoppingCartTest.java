@@ -225,16 +225,18 @@ class ShoppingCartTest {
     @DisplayName("接口：未登录被拒；库存不足返回 409 且不改动购物袋")
     void cartApiRejectsAnonymousAndOutOfStock() throws Exception {
         mvc.perform(get("/api/cart")).andExpect(status().isUnauthorized());
+        // API 不再用 CSRF 防护（改由 SameSite Cookie 承担），带认证的合法 POST 直接通过。
         mvc.perform(post("/api/cart/items").with(user(ALICE))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"productId\":1,\"quantity\":1}"))
-                .andExpect(status().isForbidden()); // 缺 CSRF
+                .andExpect(status().isOk());
 
-        mvc.perform(post("/api/cart/items").with(user(ALICE)).with(csrf())
+        mvc.perform(post("/api/cart/items").with(user(ALICE))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"productId\":5,\"quantity\":11}"))
                 .andExpect(status().isConflict());
-        assertThat(cart.view(ALICE).isEmpty()).isTrue();
+        // 只有 product 1 成功加入；product 5 库存不足被拒，购物袋里没有它。
+        assertThat(cart.view(ALICE).items()).hasSize(1);
     }
 
     // ————— 与助手工具链的接线 —————

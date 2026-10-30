@@ -2,6 +2,8 @@ package dev.learning.mall.catalog.internal;
 
 import dev.learning.mall.catalog.api.*;
 import dev.learning.mall.common.BusinessException;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.util.List;
@@ -24,13 +26,28 @@ public class ProductService implements ProductCatalog {
     private final ApplicationEventPublisher events;
 
     public ProductService(ProductRepository repository, StockLedgerRepository ledger,
-            ApplicationEventPublisher events) {
+            ApplicationEventPublisher events, MeterRegistry registry) {
         this.repository = repository;
         this.ledger = ledger;
         this.events = events;
+        // 售罄 Gauge（D2）采用<b>读数时实时查库</b>，而不是「启动查一次 + 商品变更事件刷新」：
+        // 下单预占 / 取消归还 / 退款回补也改 stock，但它们（刻意）不发 ProductChangedEvent——
+        // 靠事件刷新会在每一次成交后静默漂移。一条 COUNT 在当前数据量下是亚毫秒级，
+        // 用极小的读开销换掉「指标与真相不一致」这一整类事故。
+        Gauge.builder("mall.catalog.sold_out", repository, repo -> (double) repo.soldOutCount())
+                .description("售罄（stock = 0）的商品种数，读数时实时统计")
+                .register(registry);
     }
 
     public ProductPage search(ProductQuery query) { return repository.search(query); }
+
+    public ProductPage searchOfMerchant(long merchantId, ProductQuery query) {
+        return repository.search(query, merchantId);
+    }
+
+    public MerchantStockSummary stockSummaryOfMerchant(long merchantId) {
+        return repository.summaryOfMerchant(merchantId);
+    }
 
     public List<ProductView> sampleAcrossCategories(int perCategory, int limit) {
         return repository.sampleAcrossCategories(perCategory, limit);
@@ -42,6 +59,11 @@ public class ProductService implements ProductCatalog {
 
     public ProductView get(long id) {
         return repository.find(id).orElseThrow(() -> BusinessException.notFound("商品不存在"));
+    }
+
+    @Override
+    public List<ProductView> findByIds(List<Long> ids) {
+        return repository.findAll(ids);
     }
 
     /**

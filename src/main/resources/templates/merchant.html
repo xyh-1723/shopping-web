@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN" xmlns:th="http://www.thymeleaf.org">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>小小商城 · 商家中心</title>
+    <link rel="icon" type="image/svg+xml" href="/art/bag.svg" />
+    <link rel="stylesheet" href="/css/style.css" />
+    <script src="/js/merchant.js" defer></script>
+  </head>
+  <body th:attr="data-user=${username}">
+    <header class="site-header">
+      <a class="brand" href="/"
+        ><span class="brand-mark">小</span>小小商城<span class="brand-en"
+          >MERCHANT CENTER</span
+        ></a
+      >
+      <nav aria-label="主导航">
+        <a class="nav-link" href="/">返回商城 ↗</a>
+        <a class="nav-link" href="/learn">学习地图 ↗</a>
+      </nav>
+      <div class="account">
+        <span class="avatar" aria-hidden="true">商</span
+        ><span th:text="${username}"></span>
+        <form th:action="@{/logout}" method="post">
+          <button class="text-button" type="submit">退出</button>
+        </form>
+      </div>
+    </header>
+    <main>
+      <div class="page-heading">
+        <div>
+          <span class="eyebrow muted">MERCHANT CENTER</span>
+          <h1 th:text="${merchant != null ? merchant.name() : '商家中心'}">商家中心</h1>
+          <p th:if="${merchant != null}">
+            店铺编号 <strong th:text="${merchant.code()}"></strong> · 店主
+            <span th:text="${merchant.ownerUsername()}"></span>
+          </p>
+          <p th:if="${merchant == null}">当前账号没有关联的店铺。</p>
+        </div>
+        <label class="search" th:if="${merchant != null}"
+          ><span aria-hidden="true">⌕</span
+          ><input
+            id="merchant-search"
+            type="search"
+            placeholder="在这家店里搜索…"
+            aria-label="搜索本店商品"
+        /></label>
+      </div>
+
+      <th:block th:if="${merchant != null}">
+        <div id="merchant-summary" class="stats-grid"></div>
+        <div class="info-strip">
+          这里只显示 <strong>本店</strong> 的商品与库存。库存数字取自
+          <code>product.stock</code>：下单预占、取消归还、退款回补都会实时改变它。
+        </div>
+        <div id="merchant-products"><p class="empty">正在读取库存…</p></div>
+        <div class="pager" id="merchant-pager"></div>
+      </th:block>
+
+      <div class="empty" th:if="${merchant == null}">
+        这个账号不是商家账号，或者与店铺的绑定已经解除。<br />
+        商家账号的归属写在 <code>merchant.owner_username</code> 上，不是靠角色名字猜的。
+      </div>
+    </main>
+    <footer>
+      <a class="brand" href="/"><span class="brand-mark">小</span>小小商城</a
+      ><span>认真生活，也认真学习。</span
+      ><span>Spring Boot 学习项目 / 2026</span>
+    </footer>
+  </body>
+</html>

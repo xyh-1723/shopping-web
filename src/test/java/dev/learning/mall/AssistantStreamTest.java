@@ -219,7 +219,7 @@ class AssistantStreamTest {
     }
 
     @Test
-    @DisplayName("SSE 端点：未登录 401、缺 CSRF 403 —— 安全防线对流式端点同样生效")
+    @DisplayName("SSE 端点：未登录 401 —— 安全防线对流式端点同样生效")
     void streamEndpointKeepsSecurity() throws Exception {
         ConversationView conv = service.create(ALICE, null);
         mvc.perform(post("/api/assistant/conversations/" + conv.id() + "/stream")
@@ -227,11 +227,12 @@ class AssistantStreamTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"你好\"}"))
                 .andExpect(status().isUnauthorized());
+        // API 不再用 CSRF 防护（改由 SameSite Cookie 承担）；带认证的请求直接进入流式响应。
         mvc.perform(post("/api/assistant/conversations/" + conv.id() + "/stream")
                         .with(user(ALICE).roles("USER"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"你好\"}"))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isOk());
     }
 
     @Test

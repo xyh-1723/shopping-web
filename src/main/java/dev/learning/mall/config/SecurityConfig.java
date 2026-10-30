@@ -1,21 +1,18 @@
 package dev.learning.mall.config;
 
-import dev.learning.mall.merchant.api.MerchantDirectory;
-import dev.learning.mall.merchant.api.MerchantView;
-import java.util.ArrayList;
-import java.util.List;
-import org.springframework.beans.factory.annotation.Value;
+import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.core.userdetails.User;
-import org.springframework.security.core.userdetails.UserDetails;
+import org.springframework.security.core.session.SessionRegistry;
+import org.springframework.security.core.session.SessionRegistryImpl;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.security.provisioning.InMemoryUserDetailsManager;
+import org.springframework.security.provisioning.JdbcUserDetailsManager;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.session.HttpSessionEventPublisher;
 import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
 import org.springframework.security.web.util.matcher.OrRequestMatcher;
 
@@ -25,40 +22,41 @@ public class SecurityConfig {
     PasswordEncoder passwordEncoder() { return new BCryptPasswordEncoder(); }
 
     /**
-     * 账号清单。
+     * 账号从内存迁到数据库（阶段 A3）：用 {@link JdbcUserDetailsManager} 读写
+     * {@code users}/{@code authorities} 表。这样改密码、增删账号都不用重启，
+     * 多实例部署也能共享同一份账号。
      *
-     * <p><b>商家账号是从 {@code merchant} 表生成的，不是在这里手写出来的</b>（阶段 3a）。
-     * 手写 N 个商家账号的做法有个致命问题：账号与「哪一家店」之间没有绑定，
-     * 于是每一个商家账号都天然拥有全部店铺的数据——造 200 个账号等于造 200 个越权账号。
-     * 现在 {@code merchant.owner_username} 是唯一绑定点，账号由表推导，
-     * 「有多少家店就有多少个商家账号」这句话才成立。
+     * <p>账号本身不在这个 bean 里创建——{@code UserAccountProvisioner} 在启动时
+     * 幂等地把演示账号和商家账号同步进表。这里只负责给出「用哪张表存账号」。
      *
-     * <p><b>同一份口令只做一次 BCrypt</b>：BCrypt(cost=10) 一次约 60-100ms，
-     * 200 个商家账号各编码一遍会把启动时间拖到十几秒，而它们用的是同一个配置值。
-     * {@code User.withUsername(...).password(...)} 收的本来就是<b>已编码</b>的哈希串，
-     * 复用同一个串不改变任何语义，只省掉 199 次毫无意义的重复计算。
+     * <p>商家账号与店的绑定仍走 {@code merchant.owner_username}，这个绑定点没变，
+     * 变的只是「账号存在哪」。
      */
     @Bean
-    UserDetailsService users(PasswordEncoder encoder, MerchantDirectory merchants,
-                             @Value("${mall.demo-password}") String password,
-                             @Value("${mall.merchant-password}") String merchantPassword) {
-        String demoHash = encoder.encode(password);
-        String merchantHash = encoder.encode(merchantPassword);
+    UserDetailsService users(DataSource dataSource) {
+        // 改密（阶段 A4）在 Controller 里用 PasswordEncoder + updateUser 手动完成，
+        // 不走 JdbcUserDetailsManager.changePassword（它需要 setPasswordEncoder，
+        // 而当前版本的 API 不直接暴露这个 setter）。
+        return new JdbcUserDetailsManager(dataSource);
+    }
 
-        List<UserDetails> accounts = new ArrayList<>();
-        accounts.add(User.withUsername("student").password(demoHash).roles("USER").build());
-        accounts.add(User.withUsername("classmate").password(demoHash).roles("USER").build());
-        // 店员账号：演示「同一助手、不同权限」。密码与演示账号共用一份 ${mall.demo-password}。
-        accounts.add(User.withUsername("admin").password(demoHash).roles("USER", "STAFF").build());
-        // 商家账号：一家店一个，店主账号就是 merchant.owner_username。
-        // 角色刻意只有 MERCHANT、不带 STAFF——它能做什么由这一个角色说了算，
-        // 日常运营执行权（改价 / 改库存 / 发货）不下发给经营决策方。
-        // 1 号店的店主沿用既有 merchant 账号：它在既有测试与文档里就是「那个商家」。
-        for (MerchantView shop : merchants.all()) {
-            accounts.add(User.withUsername(shop.ownerUsername()).password(merchantHash)
-                    .roles("USER", "MERCHANT").build());
-        }
-        return new InMemoryUserDetailsManager(accounts);
+    /**
+     * 会话注册表：{@code maximumSessions(1)} 靠它知道「这个账号当前有几个活跃会话」。
+     * 第二个登录会把第一个标记为过期，下次请求时被踢下线。
+     */
+    @Bean
+    SessionRegistry sessionRegistry() {
+        return new SessionRegistryImpl();
+    }
+
+    /**
+     * 把 Servlet 容器的 session 销毁事件转给 Spring Security，
+     * 否则用户关浏览器后 session 过期了，注册表还以为他在线——
+     * 下次登录就会被「最大会话数」拦住。
+     */
+    @Bean
+    HttpSessionEventPublisher httpSessionEventPublisher() {
+        return new HttpSessionEventPublisher();
     }
 
     @Bean
@@ -74,6 +72,21 @@ public class SecurityConfig {
                 .requestMatchers("/api/assistant/audit").hasRole("STAFF")
                 // Agent 运行轨迹同样只对店员开放：里面含工具参数与回答摘要，属于运营侧数据。
                 .requestMatchers("/api/assistant/runs", "/api/assistant/runs/*/steps").hasRole("STAFF")
+                // 创建优惠券是经营侧动作：店员可建平台券 / 任意店券，商家只能建本店券。
+                // 第二层「这张券是不是你的店」在 CouponService 里，由登录账号反查店铺号——
+                // 请求体里没有店铺号可填，所以这里的 URL 限制已经是边界的一半，另一半是归属查询。
+                .requestMatchers(HttpMethod.POST, "/api/coupons").hasAnyRole("STAFF", "MERCHANT")
+                // 领券、看券、用券是买家动作，落到 anyRequest().authenticated()。
+                // 商家中心（本店商品与库存、改密）只对商家开放。这里是第一层「你是不是商家」；
+                // 第二层「那家店是不是你的」在 Controller/Service 里，由登录账号推出店铺号——
+                // 请求参数里根本没有可篡改的店铺号。
+                .requestMatchers("/api/merchant/**").hasRole("MERCHANT")
+                // 发货是经营侧动作：店员能发任何人的，商家只能发自己那家店的
+                // （第二层「是不是你的店」在 FulfillmentService 里，需要读库才知道，
+                //  URL 匹配器做不到，所以这里只做第一层「你是不是经营侧的人」）。
+                // 用 hasAnyRole 而不是 hasRole("STAFF")：商家不发货，那它的子订单就永远
+                // 停在 NONE，自动收货与退款分流都跟着一起卡住。
+                .requestMatchers(HttpMethod.POST, "/api/orders/subs/*/ship").hasAnyRole("STAFF", "MERCHANT")
                 // 退款审批只对商家开放：钱的决定权与运营执行权分离（设计 §3.4）。
                 // 这里刻意用 hasRole("MERCHANT") 而不是 hasAnyRole("STAFF","MERCHANT")：
                 // 让店员能批退款，等于把「店员自己申请退款自己批准」这条路打开。
@@ -87,6 +100,17 @@ public class SecurityConfig {
                 .anyRequest().authenticated())
             .formLogin(login -> login.loginPage("/login").defaultSuccessUrl("/", true).permitAll())
             .logout(logout -> logout.logoutSuccessUrl("/"))
+            // 单账号单会话：同账号第二个登录顶掉第一个。
+            // 商家账号不该被多人同时使用——出了问题连「谁操作的」都查不清。
+            // 被顶掉的会话给 401 + JSON，与未登录入口同一口径（默认是 200 + 一句英文文本，
+            // 对 API 调用方等于把「掉线」伪装成「成功」）。
+            .sessionManagement(s -> s.maximumSessions(1)
+                    .sessionRegistry(sessionRegistry())
+                    .expiredSessionStrategy(event -> {
+                        var res = event.getResponse();
+                        res.setStatus(401); res.setContentType("application/json;charset=UTF-8");
+                        res.getWriter().write("{\"code\":\"SESSION_EXPIRED\",\"message\":\"账号已在别处登录，当前会话已失效\"}");
+                    }))
             .exceptionHandling(errors -> errors
                 // 未登录给 401 + JSON，而不是重定向到登录页：302 + HTML 对这些机器读的
                 // 端点毫无意义，还会让监控脚本把「登录页 200」误判成「接口正常」。
@@ -115,8 +139,13 @@ public class SecurityConfig {
                 .accessDeniedHandler((req, res, ex) -> {
                     res.setStatus(403); res.setContentType("application/json;charset=UTF-8");
                     res.getWriter().write("{\"code\":\"FORBIDDEN\",\"message\":\"请求校验失败，请刷新页面后重试\"}");
-                }));
+                }))
         // 保留默认 CSRF 防护，页面把 token 带入每个修改请求。
+        // 但纯 API（/api/**）的 CSRF 关掉：前端是 fetch + JSON，不是表单提交，
+        // 让它带 CSRF token 反而增加复杂度。防 CSRF 的职责转交给 SameSite=Lax 的会话 Cookie
+        // （见 application.yml）——Lax 会挡住跨站 POST，那正是 CSRF 攻击的形态；
+        // 而用户从邮件/聊天里点链接进来（顶层 GET 导航）仍能带 Cookie，不破坏体验。
+        .csrf(csrf -> csrf.ignoringRequestMatchers("/api/**"));
         return http.build();
     }
 }

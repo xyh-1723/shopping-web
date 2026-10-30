@@ -26,10 +26,19 @@ class CartRepository {
                 .param("user", username).param("pid", productId).query(Integer.class).optional();
     }
 
-    /** 新增或累加：用 MERGE 让「第一次加购」与「再加一件」走同一条语句，避免竞态下插重。 */
+    /**
+     * 新增或累加：用数据库原生的「插入或更新」让「第一次加购」与「再加一件」
+     * 走同一条语句，避免竞态下插重。
+     *
+     * <p>这里刻意<b>不是</b> H2 的 {@code MERGE INTO ... KEY(...)}：那个语法只有 H2 认，
+     * 生产库 MySQL 8 既没有 {@code MERGE} 也不认 {@code KEY} 子句，加购会直接 500。
+     * {@code ON DUPLICATE KEY UPDATE} 是两边都支持的写法（H2 在 MODE=MySQL 下同样接受），
+     * 语义完全一致：命中唯一键就覆盖数量，否则插入。
+     */
     void upsert(String username, long productId, int quantity) {
-        jdbc.sql("MERGE INTO mall_cart_item(username, product_id, quantity, updated_at) " +
-                 "KEY(username, product_id) VALUES(:user, :pid, :qty, CURRENT_TIMESTAMP)")
+        jdbc.sql("INSERT INTO mall_cart_item(username, product_id, quantity, updated_at) " +
+                 "VALUES(:user, :pid, :qty, CURRENT_TIMESTAMP) " +
+                 "ON DUPLICATE KEY UPDATE quantity = :qty, updated_at = CURRENT_TIMESTAMP")
                 .param("user", username).param("pid", productId).param("qty", quantity).update();
     }
 

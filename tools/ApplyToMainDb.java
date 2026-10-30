@@ -20,7 +20,7 @@ public class ApplyToMainDb {
                 new SimpleDriverDataSource(new com.mysql.cj.jdbc.Driver(), url, "root", "123456");
 
         var r = Flyway.configure().dataSource(source)
-                .locations("filesystem:src/main/resources/db/migration").load().migrate();
+                .locations("filesystem:src/main/resources/db/migration", "filesystem:src/main/resources/db/dev-seed").load().migrate();
         System.out.println("已应用 " + r.migrationsExecuted + " 个迁移，当前版本 " + r.targetSchemaVersion);
 
         try (Connection c = source.getConnection(); Statement s = c.createStatement()) {

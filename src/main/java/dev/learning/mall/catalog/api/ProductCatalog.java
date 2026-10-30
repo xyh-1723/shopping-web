@@ -20,6 +20,25 @@ public interface ProductCatalog {
     ProductPage search(ProductQuery query);
 
     /**
+     * 按店收窄的分页查询：只看 {@code merchantId} 这一家店的货。
+     *
+     * <p>为什么单独一个方法，而不是给 {@link ProductQuery} 加一个 {@code merchantId} 字段：
+     * 那个查询对象被公开货架与购物助手共用，一旦脸上多出「店」，调用方就会开始
+     * 从请求参数里填它——而「你是谁家的店」只能由登录账号推导，
+     * 不能由调用方声明。作为参数传入，语义就只剩「服务器算出来的那个店」。
+     */
+    ProductPage searchOfMerchant(long merchantId, ProductQuery query);
+
+    /**
+     * 一家店的库存概览（商品种类数 / 库存总量 / 售罄数）。
+     *
+     * <p>它和 {@link #searchOfMerchant} 是两件事：概览要覆盖<b>整家店</b>，
+     * 而分页查询只覆盖当前这一页。用当前页去累加得出「本店库存总量」会得到一个
+     * 随翻页变化的数字——那不是概览，是错觉。
+     */
+    MerchantStockSummary stockSummaryOfMerchant(long merchantId);
+
+    /**
      * 不带任何条件地"逛全店"：每个分类最多 {@code perCategory} 件，总共不超过 {@code limit} 件。
      *
      * <p>为什么不能直接用 {@link #search} 按价格升序截前 N 件：那只等于告诉用户
@@ -38,6 +57,16 @@ public interface ProductCatalog {
     LowStockReport lowStock(double threshold, int limit);
 
     ProductView get(long id);
+
+    /**
+     * 按一批编号取商品，<b>一次查询</b>。返回顺序不保证，调用方自己按需排列；
+     * 不存在的编号直接缺席（不抛异常），因为批量场景下「某个编号已下架」是常态，
+     * 让一条脏数据把整批打挂不合理。
+     *
+     * <p>为什么需要它：{@link #get(long)} 放在循环里就是 N+1——推荐服务曾对
+     * 每个种子商品各查一次，种子有 10 个就是 10 条 SQL。批量取把条数压成 1。
+     */
+    List<ProductView> findByIds(List<Long> ids);
 
     /**
      * 预占库存（下单时）。

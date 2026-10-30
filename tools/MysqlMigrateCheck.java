@@ -21,7 +21,7 @@ public class MysqlMigrateCheck {
 
         var result = Flyway.configure()
                 .dataSource(source)
-                .locations("filesystem:src/main/resources/db/migration")
+                .locations("filesystem:src/main/resources/db/migration", "filesystem:src/main/resources/db/dev-seed")
                 .load()
                 .migrate();
 

@@ -161,7 +161,7 @@ class V16MigrationTest {
         String url = TestH2.inMemory("v16-replay-" + UUID.randomUUID());
         SimpleDriverDataSource replay = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
         try {
-            Flyway.configure().dataSource(replay).locations("classpath:db/migration")
+            Flyway.configure().dataSource(replay).locations("classpath:db/migration", "classpath:db/dev-seed")
                     .target("16").load().migrate();
 
             try (Connection c = replay.getConnection();

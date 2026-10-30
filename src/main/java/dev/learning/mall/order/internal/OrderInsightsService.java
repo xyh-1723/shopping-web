@@ -35,7 +35,9 @@ public class OrderInsightsService implements OrderInsights {
                         "SELECT i.product_id AS productId, i.product_name AS productName, SUM(i.quantity) AS quantity "
                                 + "FROM order_item i JOIN mall_order o ON o.id = i.order_id "
                                 + "WHERE o.status = 'PAID' GROUP BY i.product_id, i.product_name "
-                                + "ORDER BY quantity DESC LIMIT 3")
+                                // 次排序键 product_id 不能省：销量并列时数据库不保证两次查询给出同一个顺序，
+                                // 「热销 Top3」就会自己换人。
+                                + "ORDER BY quantity DESC, i.product_id LIMIT 3")
                 .query(TopProduct.class).list();
         return new OrderStats(total, pending, paid, cancelled,
                 paidAmount == null ? BigDecimal.ZERO : paidAmount, top);
@@ -44,7 +46,8 @@ public class OrderInsightsService implements OrderInsights {
     @Override
     @Transactional(readOnly = true)
     public List<OrderView> ordersOf(String username) {
-        return orders.list(username).stream().map(orders::view).toList();
+        // 批量装配：SQL 条数固定 3 条，与订单数量无关（原来每单 3 条，20 单就是 60 条）。
+        return orders.views(orders.list(username));
     }
 
     private long count(String sql) {

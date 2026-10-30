@@ -172,6 +172,12 @@ class OrderExpiryShardingTest {
     @DisplayName("本实例只报自己那份积压：不在自己分片里的到期订单不算进 backlog")
     void backlogCountsOnlyThisShardsWork() {
         for (int i = 0; i < 12; i++) create();
+        // 订单号是随机 UUID 派生的，12 单全落在「非 0 号分片」的概率是 (3/4)^12 ≈ 3%。
+        // 补几单直到确实有一单落在 0 号分片：这里要验的是「只报自己那份的积压」，
+        // 不该被随机数是否够幸运决定成败（这个断言之前偶发失败过）。
+        // 注意必须在下面前推时钟之前补单——补出来的订单到期时刻跟着时钟走，
+        // 推完时钟再补就落在「尚未到期」里，永远数不到。
+        for (int guard = 0; guard < 60 && countExpiredInShard(0, 4) == 0; guard++) create();
         at(BASE.plusMinutes(15));
 
         properties.setAutoCloseShardCount(4);

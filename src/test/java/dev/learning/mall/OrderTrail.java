@@ -33,6 +33,13 @@ import org.springframework.jdbc.core.simple.JdbcClient;
  * {@code order_item} 与 {@code mall_order}。顺序写反会在 H2 上撞外键约束，
  * 而且报错信息指向「被引用的那张表」，不看 DDL 很难反推出是顺序问题。
  *
+ * <p><b>{@code order_sub} 与 {@code refund} 也要一起清</b>（V25 之后）：
+ * 它们都刻意没有指向 {@code mall_order} 的外键，删订单带不走它们，
+ * 于是「订单清了、子订单与退款还挂着」会污染下一个用例——
+ * 尤其是 {@code refund} 的 {@code uq_refund_inflight}：残留的一笔在途退款
+ * 会让下一个用例以「唯一索引冲突」的形式红，而报错完全指不到真正的成因。
+ * 清理动作收在 {@link SubOrders#purge}。
+ *
  * <p>{@code notification_delivery} 的 {@code order_id} <b>没有</b>外键（V17 刻意不加），
  * 所以它撞不动删除，但也正因为没有外键，删订单带不走它——
  * 这里顺带按订单号一起清掉，免得「订单清了、留痕还在」。
@@ -61,6 +68,8 @@ final class OrderTrail {
                 .param("ids", ids).update();
         jdbc.sql("DELETE FROM outbox_event WHERE aggregate_id IN (:ids)")
                 .param("ids", ids).update();
+        // 子订单与退款：无外键，必须显式带出来，否则会残留到下一个用例。
+        SubOrders.purge(jdbc, ids);
         jdbc.sql("DELETE FROM order_item WHERE order_id IN (:ids)")
                 .param("ids", ids).update();
         jdbc.sql("DELETE FROM mall_order WHERE id IN (:ids)")

@@ -169,8 +169,8 @@ class MerchantOwnershipTest {
 
         String u = buyer("queue");
         OrderView paid = payWithWallet(u, productId);
-        fulfillment.ship(paid.id(), "admin", "SF-SCOPE-1");
-        RefundView queued = refunds.apply(paid.id(), u, null, "WRONG_ITEM", "发错款式");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-SCOPE-1");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "WRONG_ITEM", "发错款式");
         assertThat(queued.route()).as("用例前提：这笔在等商家").isEqualTo(RefundView.ROUTE_MERCHANT_APPROVAL);
 
         List<String> mine = refunds.pendingQueueFor(owner, 20).stream().map(RefundView::id).toList();
@@ -193,8 +193,8 @@ class MerchantOwnershipTest {
 
         String u = buyer("cross");
         OrderView paid = payWithWallet(u, productId);
-        fulfillment.ship(paid.id(), "admin", "SF-CROSS-1");
-        RefundView queued = refunds.apply(paid.id(), u, null, "DAMAGED", "有磕碰");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-CROSS-1");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "DAMAGED", "有磕碰");
         long balanceBefore = WalletProbe.balanceCents(jdbc, u);
 
         // 批的人是「别家店」的店主——在加 merchant 表之前，这一步会成功放款。
@@ -225,8 +225,8 @@ class MerchantOwnershipTest {
 
         String u = buyer("cross-reject");
         OrderView paid = payWithWallet(u, productId);
-        fulfillment.ship(paid.id(), "admin", "SF-CROSS-2");
-        RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "其他原因");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-CROSS-2");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "OTHER", "其他原因");
 
         assertThatThrownBy(() -> refunds.reject(queued.id(), foreign, "不归我管"))
                 .isInstanceOf(BusinessException.class);

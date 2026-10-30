@@ -67,7 +67,9 @@ class CatalogMigrationTest {
     @BeforeAll static void replayAllMigrations() throws SQLException {
         String url = TestH2.inMemory("catalog-replay-" + UUID.randomUUID());
         SimpleDriverDataSource source = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
-        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        // 重放「开发环境的完整迁移链」：结构（db/migration）+ 演示商品目录（db/dev-seed）。
+        // 本类断言的正是种子数据契约，缺了 dev-seed 就只剩空目录。
+        Flyway.configure().dataSource(source).locations("classpath:db/migration", "classpath:db/dev-seed").load().migrate();
         replayed = source.getConnection();
     }
 

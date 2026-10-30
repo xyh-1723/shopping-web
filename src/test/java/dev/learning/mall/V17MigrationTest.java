@@ -47,6 +47,8 @@ import org.springframework.test.context.ActiveProfiles;
 class V17MigrationTest {
 
     private static final String PROBE_ORDER = "v17-order";
+    /** V25 起 refund.order_sub_id 是 NOT NULL，探针行也要挂上子订单号（该列无外键，合成值即可）。 */
+    private static final String PROBE_SUB = PROBE_ORDER + "-S1";
     private static final String PROBE_USER = "v17-probe";
     private static final String PROBE_CONVERSATION = "v17-conversation";
 
@@ -139,10 +141,11 @@ class V17MigrationTest {
         assertThat(generatedColumnsOf("REFUND")).contains("IN_FLIGHT");
 
         // 生成列：INSERT 里写它会报 cannot be assigned。
-        Throwable thrown = catchThrowableOfType(() -> jdbc.sql("INSERT INTO refund(id,order_id,username,"
+        // （V25 起必须带上 order_sub_id，否则 NOT NULL 会抢在生成列报错之前拒掉这条 INSERT。）
+        Throwable thrown = catchThrowableOfType(() -> jdbc.sql("INSERT INTO refund(id,order_id,order_sub_id,username,"
                         + "amount,reason_code,route,status,requested_by,in_flight) "
-                        + "VALUES('r-v17-gen',:o,:u,1,'NO_REASON','AUTO','PENDING_APPROVAL',:u,:o)")
-                .param("o", PROBE_ORDER).param("u", PROBE_USER).update(), Throwable.class);
+                        + "VALUES('r-v17-gen',:o,:sub,:u,1,'NO_REASON','AUTO','PENDING_APPROVAL',:u,:o)")
+                .param("o", PROBE_ORDER).param("sub", PROBE_SUB).param("u", PROBE_USER).update(), Throwable.class);
         // H2 把这条报错放在最内层的原因里（外层只有一句 bad SQL grammar），
         // 所以断言必须走整条异常链，而不是只看最外层那条消息。
         assertThat(messageChain(thrown)).contains("Generated column")
@@ -160,12 +163,13 @@ class V17MigrationTest {
     void inFlightRecomputesOnTerminal() {
         insertRefund("r-v17-recompute", "PENDING_APPROVAL", "AUTO", null, null);
 
-        assertThat(inFlightOf("r-v17-recompute")).isEqualTo(PROBE_ORDER);
+        // V25 起生成列装的是子订单号（在途唯一的单位从「订单」收窄成「子订单」）。
+        assertThat(inFlightOf("r-v17-recompute")).isEqualTo(PROBE_SUB);
 
         // PENDING_APPROVAL → APPROVED：仍在途（CASE 里两个值都算）
         assertThat(jdbc.sql("UPDATE refund SET status='APPROVED',decided_by='SYSTEM',"
                         + "decided_at=CURRENT_TIMESTAMP WHERE id='r-v17-recompute'").update()).isEqualTo(1);
-        assertThat(inFlightOf("r-v17-recompute")).isEqualTo(PROBE_ORDER);
+        assertThat(inFlightOf("r-v17-recompute")).isEqualTo(PROBE_SUB);
 
         // APPROVED → REFUNDED：让位
         assertThat(jdbc.sql("UPDATE refund SET status='REFUNDED' WHERE id='r-v17-recompute'").update())
@@ -248,7 +252,7 @@ class V17MigrationTest {
         String url = TestH2.inMemory("v17-replay-" + UUID.randomUUID());
         SimpleDriverDataSource replay = new SimpleDriverDataSource(new org.h2.Driver(), url, "sa", "");
         try {
-            Flyway.configure().dataSource(replay).locations("classpath:db/migration")
+            Flyway.configure().dataSource(replay).locations("classpath:db/migration", "classpath:db/dev-seed")
                     .target("17").load().migrate();
 
             try (Connection c = replay.getConnection();
@@ -279,12 +283,13 @@ class V17MigrationTest {
      * 这是退款最常见的形状，让调用处保持沉默比逼它们处处写 0 更好读。
      */
     private int insertRefund(String id, String status, String route, String decidedBy, Integer stockReturned) {
-        return jdbc.sql("INSERT INTO refund(id,order_id,username,amount,reason_code,route,status,"
+        return jdbc.sql("INSERT INTO refund(id,order_id,order_sub_id,username,amount,reason_code,route,status,"
                         + "requested_by,decided_by,decided_at,stock_returned) "
-                        + "VALUES(:id,:order,:user,47.00,'NO_REASON',:route,:status,:user,:decided,"
+                        + "VALUES(:id,:order,:sub,:user,47.00,'NO_REASON',:route,:status,:user,:decided,"
                         + "CASE WHEN :decided IS NULL THEN NULL ELSE CURRENT_TIMESTAMP END,COALESCE(:stock,0))")
                 .param("id", id)
                 .param("order", PROBE_ORDER)
+                .param("sub", PROBE_SUB)
                 .param("user", PROBE_USER)
                 .param("route", route)
                 .param("status", status)

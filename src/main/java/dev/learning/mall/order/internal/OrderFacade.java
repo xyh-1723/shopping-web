@@ -32,11 +32,15 @@ public class OrderFacade implements OrderCheckout {
         if (request == null || request.items() == null || request.items().isEmpty() || request.items().size() > 20
                 || request.items().stream().anyMatch(line -> line == null || line.productId() <= 0 || line.quantity() < 1 || line.quantity() > 99))
             throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_ITEMS", "请检查商品和数量");
+        if (request.userCouponId() != null && request.userCouponId().length() > 64)
+            throw new BusinessException(HttpStatus.BAD_REQUEST, "INVALID_COUPON", "优惠券编号过长");
         List<CreateOrderRequest.Line> lines = request.items().stream().sorted(Comparator.comparingLong(CreateOrderRequest.Line::productId)).toList();
         if (lines.stream().map(CreateOrderRequest.Line::productId).distinct().count() != lines.size())
             throw new BusinessException(HttpStatus.BAD_REQUEST, "DUPLICATE_PRODUCT", "同一种商品请合并数量后提交");
         String canonical = lines.stream().map(line -> line.productId() + ":" + line.quantity()).reduce("", (a, b) -> a + b + ";");
-        String hash = hash(canonical);
+        // 券也是「买了什么」的一部分：同一个请求编号换一张券，属于不同的下单意图。
+        // 不把它纳入哈希，就会出现「换券重放却拿到上一张券的旧订单」。
+        String hash = hash(canonical + ";coupon=" + (request.userCouponId() == null ? "" : request.userCouponId()));
         var existing = orders.byKey(user, key);
         if (existing.isPresent()) return replay(existing.get(), hash);
         // 拿不到快照（未提交、已过期或属于他人）时保持向后兼容，不阻断下单。
@@ -45,7 +49,7 @@ public class OrderFacade implements OrderCheckout {
                 .map(snapshot -> snapshot.quote().payable())
                 .orElse(null);
         try {
-            return transactions.create(user, key, hash, lines, expectedPayable);
+            return transactions.create(user, key, hash, lines, expectedPayable, request.userCouponId());
         } catch (DuplicateKeyException conflict) {
             OrderRow row = orders.byKey(user, key).orElseThrow(() -> conflict);
             return replay(row, hash);

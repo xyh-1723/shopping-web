@@ -622,6 +622,31 @@ main {
 .cart-summary > .subtle {
   font-size: 9px;
 }
+.coupon-pick {
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #dde3d5;
+}
+.coupon-pick select {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  font-size: 10px;
+  color: var(--ink);
+}
+.coupon-line {
+  color: #b06a3b;
+}
+.cart-total-line {
+  align-items: baseline;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
 .cart-note {
   font-size: 9px;
   line-height: 1.9;
@@ -2225,5 +2250,83 @@ body.dropping::after {
   .voice-mic {
     width: 36px;
     height: 36px;
+  }
+}
+
+/* —— 商家中心：本店商品与库存（只读） ——
+   三张概览卡而不是四张：这里要回答的是「有多少种、一共有多少件、有多少缺货」，
+   硬凑第四格只会多出一个没人看的数字。 */
+#merchant-summary {
+  grid-template-columns: repeat(3, 1fr);
+}
+#merchant-summary .stat-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.merchant-result {
+  margin: 20px 0 10px;
+}
+.merchant-table-wrap {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow-x: auto;
+}
+.merchant-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.merchant-table th,
+.merchant-table td {
+  padding: 12px 18px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.merchant-table th {
+  background: #f7f9f2;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #89957e;
+  font-weight: 600;
+}
+.merchant-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+.merchant-table .product-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.merchant-table .product-desc {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.merchant-table .num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.stock-out {
+  color: #a65030;
+  font-weight: 700;
+}
+.stock-low {
+  color: #9b7c31;
+  font-weight: 700;
+}
+@media (max-width: 760px) {
+  #merchant-summary {
+    grid-template-columns: 1fr;
+  }
+  .merchant-table th:nth-child(2),
+  .merchant-table td:nth-child(2) {
+    display: none;
+  }
+  .merchant-table th,
+  .merchant-table td {
+    padding: 10px 12px;
   }
 }

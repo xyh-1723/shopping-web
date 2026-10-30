@@ -24,6 +24,12 @@ function read(key, fallback) {
 const GUEST_CART_KEY = "little-mall:guest:cart";
 let cartView = null; // 服务端返回：items + 试算金额 + 优惠说明
 let currentQuoteId = null; // 用户看到当前购物袋金额时，由服务端拍下的快照
+// 优惠券：可领列表、我的券、当前选中的用户券实例号。
+// 选中的券会随购物袋一起进下单请求；金额一律来自 /api/checkout/preview，
+// 前端不自己算「总价减券」，否则页面与服务端的取整口径迟早会分开。
+let couponView = { available: [], mine: [] };
+let selectedCouponId = read("selectedCouponId", null);
+let checkoutPreview = null;
 let guestCart = {};
 try {
   guestCart = JSON.parse(localStorage.getItem(GUEST_CART_KEY)) || {};
@@ -77,7 +83,8 @@ async function loadProductPage() {
 async function loadProducts() {
   await loadProductPage();
   await loadCart();
-  renderCart();
+  if (user) await loadCoupons();
+  await refreshCheckoutPreview();
 }
 // 翻页与筛选共用的入口：改条件就回到第一页，只翻页才保留页码。
 function resetPage() {
@@ -141,6 +148,57 @@ async function loadCart() {
     cartView = null;
     currentQuoteId = null;
   }
+}
+// 只有「未使用」的券能选；锁定中、已用、过期都不该出现在下拉里。
+function usableCoupons() {
+  return couponView.mine.filter((coupon) => coupon.status === "UNUSED");
+}
+async function loadCoupons() {
+  if (!user) {
+    couponView = { available: [], mine: [] };
+    selectedCouponId = null;
+    return;
+  }
+  try {
+    const [available, mine] = await Promise.all([
+      api("/api/coupons"),
+      api("/api/coupons/mine"),
+    ]);
+    couponView = { available, mine };
+  } catch {
+    // 券拉取失败不该拖垮货架与购物袋：页面照常可用，只是暂时不能选券。
+    couponView = { available: [], mine: [] };
+  }
+  // 选中的券可能刚刚被另一笔订单用掉、或者已过期；继续拿它下单只会到提交时才报错。
+  if (selectedCouponId && !usableCoupons().some((c) => c.id === selectedCouponId)) {
+    selectedCouponId = null;
+    localStorage.removeItem(scope + "selectedCouponId");
+  }
+}
+async function refreshCheckoutPreview() {
+  checkoutPreview = null;
+  if (!user || !cartView?.items?.length) {
+    renderCart();
+    return;
+  }
+  try {
+    checkoutPreview = await api("/api/checkout/preview", {
+      method: "POST",
+      body: JSON.stringify({ userCouponId: selectedCouponId || null }),
+    });
+  } catch (error) {
+    checkoutPreview = null;
+    if (selectedCouponId) {
+      // 门槛不足 / 券被占用：取消选择再预览一次，让页面回到「不用券」的真实状态，
+      // 而不是留着一个已经失效的选择继续显示旧金额。
+      selectedCouponId = null;
+      localStorage.removeItem(scope + "selectedCouponId");
+      toast(error.message, true);
+      return refreshCheckoutPreview();
+    }
+    toast(error.message, true);
+  }
+  renderCart();
 }
 // 登录后把游客暂存合并进服务端购物袋；失败不影响正常浏览，暂存会留到下次。
 async function mergeGuestCart() {
@@ -247,13 +305,40 @@ function cartEntries() {
 function renderCart() {
   const entries = cartEntries();
   const count = entries.reduce((n, row) => n + row.quantity, 0);
-  // 金额统一由服务端算（含满减与运费），前端只做展示——同一个数字只有一处算法。
-  const total =
+  // 金额统一由服务端算（含满减、券与运费），前端只做展示——同一个数字只有一处算法。
+  const subtotal =
     user && cartView
-      ? Number(cartView.total)
+      ? Number(cartView.subtotal)
       : entries.reduce((n, row) => n + Number(row.unitPrice) * row.quantity, 0);
+  // 有预览就用预览：它是「选了券之后」的真实应付，且与下单走同一套算法。
+  const total = checkoutPreview
+    ? Number(checkoutPreview.payAmount)
+    : user && cartView
+      ? Number(cartView.total)
+      : subtotal;
+  const promotion = checkoutPreview
+    ? Number(checkoutPreview.promotionDiscount)
+    : user && cartView
+      ? Number(cartView.discount)
+      : 0;
+  const couponDiscount = checkoutPreview
+    ? Number(checkoutPreview.couponDiscount)
+    : 0;
+  const shipping = checkoutPreview
+    ? Number(checkoutPreview.shippingFee)
+    : user && cartView
+      ? Number(cartView.shippingFee)
+      : null;
   $("#cart-count").textContent = count;
+  $("#cart-subtotal").textContent = money(subtotal);
   $("#cart-total").textContent = money(total);
+  $("#cart-promotion-line").classList.toggle("hidden", promotion <= 0);
+  $("#cart-promotion").textContent = promotion > 0 ? `−${money(promotion)}` : "";
+  $("#cart-shipping").textContent = shipping === null ? "登录后计算" : money(shipping);
+  $("#cart-coupon-line").classList.toggle("hidden", couponDiscount <= 0);
+  $("#cart-coupon").textContent =
+    couponDiscount > 0 ? `−${money(couponDiscount)}` : "";
+  renderCouponPicker();
   $("#checkout").disabled = count === 0 || busy;
   const notes =
     user && cartView && cartView.notes && cartView.notes.length
@@ -270,6 +355,90 @@ function renderCart() {
         )
         .join("")
     : '<div class="empty"><div class="empty-bag">♧</div>购物袋还是空的<br>选一件喜欢的小物吧</div>';
+  renderCouponHint();
+}
+function renderCouponPicker() {
+  const select = $("#coupon-select");
+  if (!select) return;
+  if (!user) {
+    select.disabled = true;
+    select.innerHTML = '<option value="">登录后可选券</option>';
+    return;
+  }
+  const usable = usableCoupons();
+  select.disabled = busy || !usable.length || !cartView?.items?.length;
+  select.innerHTML = [
+    '<option value="">不使用优惠券</option>',
+    ...usable.map(
+      (coupon) =>
+        `<option value="${esc(coupon.id)}"${coupon.id === selectedCouponId ? " selected" : ""}>${esc(coupon.name)}</option>`,
+    ),
+  ].join("");
+}
+function renderCouponHint() {
+  const hint = $("#coupon-hint");
+  if (!hint) return;
+  if (!user || !cartView?.items?.length) {
+    hint.textContent = "";
+    return;
+  }
+  if (selectedCouponId && checkoutPreview) {
+    hint.textContent = `已选「${checkoutPreview.couponName}」，券码 ${checkoutPreview.couponCode}`;
+  } else if (usableCoupons().length) {
+    hint.textContent = `有 ${usableCoupons().length} 张可用券`;
+  } else {
+    hint.textContent = "暂无可用券，去「优惠券」页看看";
+  }
+}
+function couponScope(coupon) {
+  return coupon.ownerType === "PLATFORM"
+    ? "平台券"
+    : `${coupon.merchantName || "店铺"}券`;
+}
+function couponValue(coupon) {
+  return coupon.discountType === "PERCENT"
+    ? `${Number(coupon.discountValue)}% 折扣${coupon.maxDiscount ? `（最高减 ${money(coupon.maxDiscount)}）` : ""}`
+    : `减 ${money(coupon.discountValue)}`;
+}
+const couponStatusText = {
+  UNUSED: "未使用",
+  LOCKED: "待支付",
+  USED: "已使用",
+  EXPIRED: "已过期",
+};
+function renderCoupons() {
+  $("#coupon-available").innerHTML =
+    couponView.available
+      .map((coupon) => {
+        const soldOut = coupon.remainingQuantity <= 0;
+        const disabled = soldOut || coupon.claimedByMe;
+        return `<article class="order-card"><div class="order-top"><div><h3>${esc(coupon.name)}</h3><div class="order-meta">${esc(couponScope(coupon))} · 券码 ${esc(coupon.code)} · 满 ${money(coupon.minSpend)} 可用 · 剩余 ${coupon.remainingQuantity} 张</div></div><span class="badge">${soldOut ? "已领完" : coupon.claimedByMe ? "已领取" : "可领取"}</span></div><div class="order-actions"><strong>${couponValue(coupon)}</strong><button class="button green small" data-claim="${esc(coupon.id)}" ${disabled ? "disabled" : ""}>${coupon.claimedByMe ? "已领取" : "领取"}</button></div></article>`;
+      })
+      .join("") || '<div class="empty">当前没有可领取的券。</div>';
+  $("#coupon-mine").innerHTML =
+    couponView.mine
+      .map(
+        (coupon) =>
+          `<article class="order-card"><div class="order-top"><div><h3>${esc(coupon.name)}</h3><div class="order-meta">${esc(couponScope(coupon))} · 券码 ${esc(coupon.code)} · 门槛 ${money(coupon.minSpend)} · 有效期至 ${esc(String(coupon.expiresAt).slice(0, 10))}</div></div><span class="badge">${couponStatusText[coupon.status] || esc(coupon.status)}</span></div><div class="order-actions"><strong>${couponValue(coupon)}</strong>${
+            coupon.status === "UNUSED"
+              ? '<span class="subtle">可在购物袋中选用</span>'
+              : coupon.usedOrderId
+                ? `<span class="subtle">订单 ${esc(coupon.usedOrderId.slice(0, 8))}</span>`
+                : ""
+          }</div></article>`,
+      )
+      .join("") || '<div class="empty">还没有领过券。</div>';
+}
+async function claimCoupon(id) {
+  try {
+    const claimed = await api(`/api/coupons/${id}/claim`, { method: "POST" });
+    toast(`已领取「${claimed.name}」`);
+    await loadCoupons();
+    renderCoupons();
+    await refreshCheckoutPreview();
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 async function adjust(id, delta) {
   if (busy) return;
@@ -303,7 +472,7 @@ async function addToCart(id) {
       body: JSON.stringify({ productId: Number(id), quantity: 1 }),
     });
     await captureCurrentQuote();
-    renderCart();
+    await refreshCheckoutPreview();
     toast(`已加入购物袋：${p.name}`);
   } catch (error) {
     toast(error.message, true);
@@ -326,12 +495,12 @@ async function setQuantity(id, quantity) {
             body: JSON.stringify({ productId: id, quantity }),
           });
     await captureCurrentQuote();
-    renderCart();
+    await refreshCheckoutPreview();
   } catch (error) {
     // 服务端拒绝（库存不足等）时以服务端为准重拉一次，避免前端显示与真实状态不一致。
     toast(error.message, true);
     await loadCart();
-    renderCart();
+    await refreshCheckoutPreview();
   }
 }
 async function checkout() {
@@ -346,6 +515,9 @@ async function checkout() {
       .map((row) => ({ productId: Number(row.productId), quantity: row.quantity }))
       .sort((a, b) => a.productId - b.productId),
     quoteId: currentQuoteId,
+    // 券是下单意图的一部分（服务端的幂等哈希也包含它）：
+    // 同一请求编号换券重发会被判冲突，而不是拿回上一张券的旧订单。
+    userCouponId: selectedCouponId || undefined,
   };
   // 这里是浏览器层把快照串到下单请求的关键点；MockMvc 只能覆盖服务端链路，
   // 未引入 JavaScript 测试框架前，本段仍需由真机反向冒烟守护。
@@ -365,6 +537,11 @@ async function checkout() {
     });
     localStorage.setItem(scope + "lastRequest", JSON.stringify(request));
     localStorage.removeItem(scope + "pendingRequest");
+    // 券已经被这笔订单锁住了，选择必须一起清掉：留着一个 LOCKED 的券继续显示，
+    // 用户会以为这张券还能再用一次。
+    selectedCouponId = null;
+    localStorage.removeItem(scope + "selectedCouponId");
+    checkoutPreview = null;
     // 不再在这里清袋：服务端下单成功后会同步清空（订单落库事件），页面与助手两条路径一致。
     // 原来的写法是 await api("/api/cart", { method: "DELETE" }).catch(() => {})，
     // 失败被静默吞掉——袋子留着、用户毫不知情，下次可能重复下单。清袋不该由前端负责。
@@ -528,9 +705,12 @@ async function loadOrders() {
         // 金额拆成四行展示：只有一个「合计」数字时，用户无法判断优惠到底算没算进去。
         // 应付一律取服务端算好的 payAmount，前端不做任何加减。
         const num = (v) => (v === undefined || v === null ? 0 : Number(v));
+        // discount 是「满减 + 券减免」的合计；分开展示才看得出券到底减了多少。
+        const promotionDiscount = num(order.discount) - num(order.couponDiscount);
         const breakdown = `<div class="order-amounts">
             <div><span class="subtle">商品小计</span><span>${money(num(order.subtotal))}</span></div>
-            ${num(order.discount) > 0 ? `<div><span class="subtle">满减优惠</span><span class="discount">−${money(num(order.discount))}</span></div>` : ""}
+            ${promotionDiscount > 0 ? `<div><span class="subtle">满减优惠</span><span class="discount">−${money(promotionDiscount)}</span></div>` : ""}
+            ${num(order.couponDiscount) > 0 ? `<div><span class="subtle">优惠券 ${esc(order.couponCode || "")}</span><span class="discount">−${money(num(order.couponDiscount))}</span></div>` : ""}
             <div><span class="subtle">运费</span><span>${money(num(order.shippingFee))}</span></div>
             <div class="order-payable"><span>应付</span><span>${money(num(order.payAmount))}</span></div>
           </div>`;
@@ -617,6 +797,10 @@ async function showView(view) {
   }
   try {
     if (view === "orders") await Promise.all([loadOrders(), loadWallet()]);
+    if (view === "coupons") {
+      await loadCoupons();
+      renderCoupons();
+    }
     if (view === "messages") await loadMessages();
   } catch (error) {
     toast(error.message, true);
@@ -637,6 +821,7 @@ document.addEventListener("click", async (event) => {
     await loadProductPage();
   }
   if (button.dataset.add) await addToCart(Number(button.dataset.add));
+  if (button.dataset.claim) await claimCoupon(button.dataset.claim);
   if (button.dataset.page) {
     page = Number(button.dataset.page);
     await loadProductPage();
@@ -664,6 +849,13 @@ document.addEventListener("click", async (event) => {
 // 搜索走服务端（keyword 随分页请求发出），所以这里不能直接重排本机数组；
 // 250ms 防抖把"打完一个词"合并成一次请求，而不是每敲一个字符打一次服务端。
 $("#search").addEventListener("input", onSearchInput);
+// 选券只改「下一次预览的口径」，真正锁券发生在提交订单的那一刻（服务端事务内）。
+$("#coupon-select").addEventListener("change", async (event) => {
+  selectedCouponId = event.target.value || null;
+  if (selectedCouponId) localStorage.setItem(scope + "selectedCouponId", JSON.stringify(selectedCouponId));
+  else localStorage.removeItem(scope + "selectedCouponId");
+  await refreshCheckoutPreview();
+});
 $("#checkout").addEventListener("click", checkout);
 $("#replay").addEventListener("click", replay);
 let refreshing = false;

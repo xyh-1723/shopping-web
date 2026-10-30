@@ -93,21 +93,25 @@ public class OrderTools {
     }
 
     @Tool("为当前用户的一笔【已支付订单】发起【退款确认】。当用户说「帮我把这笔退了/这单不要了退钱」时使用。"
-            + "参数：orderId 订单号（先用 myOrders 查到）；reasonCode 可选，NO_REASON(无理由)/DAMAGED(破损)"
+            + "参数：orderId 订单号（先用 myOrders 查到）；subOrderId 子订单号，必填——"
+            + "一笔订单按店铺拆成多个子订单，退款只能针对其中一家店；先用 myOrders 查看订单里的子订单列表，"
+            + "若用户没有说明退哪一家，必须先问清楚，绝不能替用户挑；reasonCode 可选，NO_REASON(无理由)/DAMAGED(破损)"
             + "/WRONG_ITEM(发错货)/OTHER。重要：这一步【不会】真的退钱，"
             + "只是生成一张待确认卡片，由用户本人在页面确认后才会发起退款；"
             + "因此返回后请告诉用户「已发起退款确认，请点击卡片上的确认」，绝不能说「钱已退回」。"
             + "未发货且金额较小的退款通常确认后立即到账；已发货或金额较大的需要商家审批，"
             + "请在用户确认后如实说明「已提交，等待商家确认」，不要承诺到账时间。返回 JSON。")
-    public String requestRefund(@ToolMemoryId String username, String orderId, String reasonCode,
-                                String reasonText) {
+    public String requestRefund(@ToolMemoryId String username, String orderId, String subOrderId,
+                                String reasonCode, String reasonText) {
         try {
-            var pending = pendingActions.requestOrderRefund(username, orderId, null, reasonCode, reasonText);
+            var pending = pendingActions.requestOrderRefund(username, orderId, subOrderId, null,
+                    reasonCode, reasonText);
             ObjectNode node = json.createObjectNode();
             node.put("status", "PENDING_CONFIRMATION");
             node.put("actionId", pending.id());
             node.put("kind", pending.kind());
             node.put("orderId", pending.orderId());
+            node.put("subOrderId", pending.orderSubId());
             node.put("amount", pending.amount());
             node.put("instruction",
                     "已为用户发起退款确认（尚未退款、尚未归还库存）。请提示用户点击页面卡片上的「确认」，"

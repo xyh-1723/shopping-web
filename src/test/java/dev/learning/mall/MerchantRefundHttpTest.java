@@ -106,8 +106,8 @@ class MerchantRefundHttpTest {
     void approveWithoutBodySucceeds() throws Exception {
         String u = buyer("approve");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-EMPTY-1");
-        RefundView queued = refunds.apply(paid.id(), u, null, "WRONG_ITEM", "发错款式");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-EMPTY-1");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "WRONG_ITEM", "发错款式");
         assertThat(queued.route()).as("用例前提：这笔在等商家").isEqualTo(RefundView.ROUTE_MERCHANT_APPROVAL);
         long before = WalletProbe.balanceCents(jdbc, u);
 
@@ -133,8 +133,8 @@ class MerchantRefundHttpTest {
     void rejectWithoutBodySucceeds() throws Exception {
         String u = buyer("reject");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-EMPTY-2");
-        RefundView queued = refunds.apply(paid.id(), u, null, "DAMAGED", "有磕碰");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-EMPTY-2");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "DAMAGED", "有磕碰");
         long before = WalletProbe.balanceCents(jdbc, u);
         int stockBefore = stockOf();
 
@@ -161,8 +161,8 @@ class MerchantRefundHttpTest {
     void approveWithBodyStillRecordsTheNote() throws Exception {
         String u = buyer("with-body");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-EMPTY-3");
-        RefundView queued = refunds.apply(paid.id(), u, null, "OTHER", "其他原因");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-EMPTY-3");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "OTHER", "其他原因");
 
         mvc.perform(post("/api/refunds/" + queued.id() + "/approve")
                         .with(merchant()).with(csrf())

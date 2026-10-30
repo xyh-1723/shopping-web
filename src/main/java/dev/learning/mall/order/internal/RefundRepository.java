@@ -28,8 +28,8 @@ class RefundRepository {
      * 取值清单里<b>不要</b>出现 {@code in_flight}：它是 {@code GENERATED ALWAYS AS} 的计算列，
      * H2 不允许写入（实测报错 {@code Generated column "PUBLIC.REFUND.IN_FLIGHT" cannot be assigned}）。
      */
-    private static final String SELECT = "SELECT id, order_id, username, amount, reason_code, reason_text, "
-            + "route, status, requested_by, decided_by, decided_at, decision_note, "
+    private static final String SELECT = "SELECT id, order_id, order_sub_id, username, amount, reason_code, "
+            + "reason_text, route, status, requested_by, decided_by, decided_at, decision_note, "
             + "stock_returned, created_at FROM refund ";
 
     private final JdbcClient jdbc;
@@ -56,37 +56,26 @@ class RefundRepository {
     }
 
     /**
-     * 某一家店的待审批队列：只含<b>订单里带了这家店商品</b>的退款。
+     * 某一家店的待审批队列：只含<b>挂在这家店子订单上</b>的退款。
      *
-     * <p>判据落在 {@code order_item.merchant_id} 上，而不是 {@code refund} 上的某个商家列——
-     * 退款挂在订单上，而「这笔订单涉及哪些店」只有明细知道。
-     * 用 {@code EXISTS} 而不是 {@code JOIN}：一笔订单里这家店可能有三行明细，
-     * JOIN 会把同一笔退款重复三遍，队列上出现三条一模一样的待办，点哪条都是同一笔。
+     * <p>判据落在 {@code refund.order_sub_id} 上——退款直接挂在子订单上，
+     * 而子订单在结构上只属于一家店（{@code order_sub.merchant_id}）。
+     * 用 {@code EXISTS} 而不是 {@code JOIN}，是因为 {@code refund} 与 {@code order_sub}
+     * 是一对一，JOIN 今天不会重复；真正会被 JOIN 放大的是
+     * 「退款 → 订单 → 明细」这条链（明细一家店可能三行），
+     * 而这条链在 V25 之后已经不存在于队列查询里了。
+     *
+     * <p><b>与 V24 版本的差别就是这次搬动的全部内容</b>：那时候判据是
+     * {@code EXISTS (SELECT 1 FROM order_item i WHERE i.order_id = r.order_id AND i.merchant_id = :m)}，
+     * 一笔跨店订单会被多家店同时判成「有我一份」。现在一笔退款只有一个子订单，
+     * 于是「这笔退款是不是我的」第一次有了唯一答案。
      */
     List<RefundRow> pendingQueueOf(long merchantId, int limit) {
         return jdbc.sql(SELECT + "r WHERE r.status = 'PENDING_APPROVAL'"
-                        + " AND EXISTS (SELECT 1 FROM order_item i"
-                        + "              WHERE i.order_id = r.order_id AND i.merchant_id = :m)"
+                        + " AND EXISTS (SELECT 1 FROM order_sub s"
+                        + "              WHERE s.id = r.order_sub_id AND s.merchant_id = :m)"
                         + " ORDER BY r.created_at, r.id LIMIT :limit")
                 .param("m", merchantId).param("limit", limit).query(RefundRow.class).list();
-    }
-
-    /**
-     * 这笔订单里有没有这家店的商品——<b>审批的归属校验</b>就落在这里。
-     *
-     * <p>它挡的是「商家 A 批准了只属于商家 B 的退款」：在加这张表之前，
-     * 任何 MERCHANT 账号都能批准任何退款，因为根本没有「你的店」这个概念可查。
-     *
-     * <p><b>已知边界（3b 之前）</b>：一笔跨店订单（同时含 A 与 B 的商品）在当下是<b>一个</b>订单、
-     * 一笔退款，所以 A 与 B 都能看到并批准它，且批准会退掉整单金额。
-     * 这不是漏判，是「退款挂在订单上」这个当前结构的直接后果；
-     * 修法是把退款挂到子订单上（阶段 3b），不是在这里按金额再切一刀——
-     * 那样会同时出现「退款」与「部分退款」两套语义。
-     */
-    boolean involvesMerchant(String orderId, long merchantId) {
-        Long n = jdbc.sql("SELECT COUNT(*) FROM order_item WHERE order_id = :o AND merchant_id = :m")
-                .param("o", orderId).param("m", merchantId).query(Long.class).single();
-        return n != null && n > 0;
     }
 
     List<RefundRow> ofUser(String username) {
@@ -95,27 +84,36 @@ class RefundRepository {
     }
 
     /**
-     * 该订单已经走到放款/放款后阶段的金额之和。
+     * 这个<b>子订单</b>已经走到放款/放款后阶段的金额之和。
      *
      * <p>判据是 {@code status IN ('APPROVED','REFUNDED')}—— {@code APPROVED} 虽然钱还没到，
      * 但它已经不可撤销地承诺了这笔钱，把它漏掉会让两笔并发审批一起通过总额校验。
      * {@code PENDING_APPROVAL} 则相反：它还没被任何人同意，不该占额度，
      * 否则「先申请一笔大的」就能把别人堵死（同一时刻只允许一笔在途，本来就已经够挤了）。
      *
-     * <p>调用方必须已经持有订单行的行锁。
+     * <p><b>范围是子订单，不是父订单</b>：上限因此是「这家店在这笔交易里分到的钱」，
+     * 而不是整单实付。跨店订单里 A 店退掉自己那份，不该占用 B 店的可退额度。
+     *
+     * <p>调用方必须已经持有子订单行的行锁。
      */
-    BigDecimal settledAmount(String orderId) {
+    BigDecimal settledAmount(String subId) {
         BigDecimal sum = jdbc.sql("SELECT COALESCE(SUM(amount), 0) FROM refund"
-                        + " WHERE order_id = :o AND status IN ('APPROVED','REFUNDED')")
-                .param("o", orderId).query(BigDecimal.class).single();
+                        + " WHERE order_sub_id = :s AND status IN ('APPROVED','REFUNDED')")
+                .param("s", subId).query(BigDecimal.class).single();
         return sum == null ? BigDecimal.ZERO : sum;
     }
 
-    /** 该订单当前有没有在途退款（应用层预检用；真正的防线是数据库唯一索引）。 */
-    boolean hasInFlight(String orderId) {
+    /**
+     * 这个子订单当前有没有在途退款（应用层预检用；真正的防线是数据库唯一索引）。
+     *
+     * <p>{@code uq_refund_inflight} 在 V25 里从 {@code order_id} 改挂到 {@code order_sub_id}：
+     * 同一个父单下，A 店与 B 店各有一笔在途退款是<b>正常且必须允许</b>的
+     * （两家店各自在处理自己的那一单），把它们互相堵死才是错的行为。
+     */
+    boolean hasInFlight(String subId) {
         Long n = jdbc.sql("SELECT COUNT(*) FROM refund"
-                        + " WHERE order_id = :o AND status IN ('PENDING_APPROVAL','APPROVED')")
-                .param("o", orderId).query(Long.class).single();
+                        + " WHERE order_sub_id = :s AND status IN ('PENDING_APPROVAL','APPROVED')")
+                .param("s", subId).query(Long.class).single();
         return n != null && n > 0;
     }
 
@@ -123,14 +121,15 @@ class RefundRepository {
      * 落一笔退款申请。<b>状态一律是 {@code PENDING_APPROVAL}</b>，
      * 包括 AUTO 路由——因为 {@code uq_refund_inflight} 只对在途态生效，
      * 直接插成 {@code REFUNDED} 会让这行从头到尾不进索引，
-     * 「同一订单两笔 AUTO 退款」就绕开了数据库约束。
+     * 「同一子订单两笔 AUTO 退款」就绕开了数据库约束。
      */
-    void insert(String id, String orderId, String username, BigDecimal amount, String reasonCode,
-                String reasonText, String route, String requestedBy) {
-        jdbc.sql("INSERT INTO refund(id,order_id,username,amount,reason_code,reason_text,"
-                        + "route,requested_by) VALUES(:id,:order,:user,:amount,:code,:text,:route,:by)")
+    void insert(String id, String orderId, String orderSubId, String username, BigDecimal amount,
+                String reasonCode, String reasonText, String route, String requestedBy) {
+        jdbc.sql("INSERT INTO refund(id,order_id,order_sub_id,username,amount,reason_code,reason_text,"
+                        + "route,requested_by) VALUES(:id,:order,:sub,:user,:amount,:code,:text,:route,:by)")
                 .param("id", id)
                 .param("order", orderId)
+                .param("sub", orderSubId)
                 .param("user", username)
                 .param("amount", amount)
                 .param("code", reasonCode)
@@ -188,8 +187,9 @@ class RefundRepository {
     }
 
     RefundView view(RefundRow row) {
-        return new RefundView(row.id(), row.orderId(), row.username(), row.amount(), row.reasonCode(),
-                row.reasonText(), row.route(), row.status(), row.requestedBy(), row.decidedBy(),
-                row.decidedAt(), row.decisionNote(), row.stockReturnedFlag(), row.createdAt());
+        return new RefundView(row.id(), row.orderId(), row.orderSubId(), row.username(), row.amount(),
+                row.reasonCode(), row.reasonText(), row.route(), row.status(), row.requestedBy(),
+                row.decidedBy(), row.decidedAt(), row.decisionNote(), row.stockReturnedFlag(),
+                row.createdAt());
     }
 }

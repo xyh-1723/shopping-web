@@ -2,10 +2,14 @@ package dev.learning.mall.order.internal;
 
 import dev.learning.mall.catalog.api.ProductCatalog;
 import dev.learning.mall.common.*;
+import dev.learning.mall.coupon.api.CouponApplication;
+import dev.learning.mall.coupon.api.CouponRedemptions;
+import dev.learning.mall.coupon.api.CouponShop;
 import dev.learning.mall.messaging.api.DomainEventPublisher;
 import dev.learning.mall.order.api.*;
 import dev.learning.mall.payment.api.*;
 import dev.learning.mall.pricing.api.Pricer;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.LocalDateTime;
@@ -23,7 +27,13 @@ public class OrderTransactions implements OrderCancellation {
     /** 关闭原因：超时未支付，由系统关闭。 */
     static final String REASON_TIMEOUT = "TIMEOUT";
 
+    /** 指标：成功下单（D2）。落点在 Service 而不是 Controller——助手工具下单也走这里，指标才不会漏。 */
+    public static final String METRIC_ORDER_PLACED = "mall.order.placed";
+    /** 指标：支付成功（D2）。只有 markPaid 真正影响 1 行才计数，重复支付不重复计。 */
+    public static final String METRIC_ORDER_PAID = "mall.order.paid";
+
     private final OrderRepository orders;
+    private final OrderSubRepository subs;
     private final ProductCatalog catalog;
     private final DomainEventPublisher events;
     private final PaymentRouter payments;
@@ -33,27 +43,38 @@ public class OrderTransactions implements OrderCancellation {
     private final Pricer pricer;
     /** Spring 的应用事件：用于「我这边发生了什么、谁爱听谁听」的进程内广播（区别于订单发件箱）。 */
     private final ApplicationEventPublisher appEvents;
-    public OrderTransactions(OrderRepository orders, ProductCatalog catalog, DomainEventPublisher events,
-            PaymentRouter payments, OrderProperties properties, Clock clock, Pricer pricer,
-            ApplicationEventPublisher appEvents) {
-        this.orders = orders; this.catalog = catalog; this.events = events; this.payments = payments;
+    /** 业务指标注册表（D2）：下单 / 支付两个 Counter 从这里出去。 */
+    private final MeterRegistry registry;
+    /** 优惠券的唯一入口：算券、占预算、锁券都在它的下单事务里完成。 */
+    private final CouponRedemptions coupons;
+    public OrderTransactions(OrderRepository orders, OrderSubRepository subs, ProductCatalog catalog,
+            DomainEventPublisher events, PaymentRouter payments, OrderProperties properties, Clock clock,
+            Pricer pricer, ApplicationEventPublisher appEvents, MeterRegistry registry,
+            CouponRedemptions coupons) {
+        this.orders = orders; this.subs = subs; this.catalog = catalog; this.events = events;
+        this.payments = payments;
         this.properties = properties; this.clock = clock; this.pricer = pricer;
         this.appEvents = appEvents;
+        this.registry = registry;
+        this.coupons = coupons;
     }
 
     @Transactional
     @Observed("create-order-transaction")
     public OrderView create(String user, String key, String hash,
-                            List<CreateOrderRequest.Line> lines, BigDecimal expectedPayable) {
+                            List<CreateOrderRequest.Line> lines, BigDecimal expectedPayable,
+                            String userCouponId) {
         // 金额快照与落单共用 OrderPricing：两条路径都从商品表取实时价格，
         // 再交给唯一的 Pricer，不允许在订单里另写一套求和规则。
-        Pricer.Quote quote = OrderPricing.quoteOf(catalog, pricer, lines);
+        Pricer.Quote baseQuote = OrderPricing.quoteOf(catalog, pricer, lines);
         // 比价必须发生在任何写调用之前。若先 insert 再抛异常，事务回滚虽然能清库，
         // 但已经越过了“价格变化时零写入”的控制流边界。
-        if (expectedPayable != null && quote.payable().compareTo(expectedPayable) != 0) {
+        // 快照是券前拍的，所以这里也比<b>券前</b>应付：券减免在服务端实时计算，
+        // 不依赖快照，也就不会出现「快照里的券价被改过」这种可能。
+        if (expectedPayable != null && baseQuote.payable().compareTo(expectedPayable) != 0) {
             throw BusinessException.conflict("PRICE_CHANGED",
                     "商品价格已变动：发起时 ¥" + expectedPayable + "，当前应付 ¥"
-                            + quote.payable() + "，请确认后重新提交");
+                            + baseQuote.payable() + "，请确认后重新提交");
         }
         List<OrderView.Item> items = lines.stream().map(line -> {
             var product = catalog.get(line.productId());
@@ -63,9 +84,24 @@ public class OrderTransactions implements OrderCancellation {
         // 截止时间在下单这一刻算好并落库：之后即使运营改了支付时限，这笔订单承诺给用户的
         // 那个时刻也不会跳变（用户看到的倒计时必须和下单时说的一致）。
         LocalDateTime expiresAt = LocalDateTime.now(clock).plusMinutes(properties.getPaymentTimeoutMinutes());
+
+        List<SubOrderSplitter.Shop> shops = OrderPricing.shopsOf(catalog, pricer, lines);
+        // 券前先拆一次，只为拿到「每家店分摊到的满减」——它是券门槛与券减免的基数。
+        // 这次拆分不落库，运费在这里不参与券计算（券只作用于商品金额）。
+        List<SubOrderSplitter.Share> promotionShares =
+                SubOrderSplitter.split(shops, baseQuote.discount(), baseQuote.shippingFee());
+        List<CouponShop> couponShops = promotionShares.stream()
+                .map(share -> new CouponShop(share.merchantId(), share.subtotal(), share.discount()))
+                .toList();
+        // 算券、占预算、锁券在下单事务内完成：后续任何一步失败（库存、唯一键）都会
+        // 连带把它们一起回滚，不会留下一张「锁着但订单没建成」的券。
+        CouponApplication coupon = coupons.reserve(user, userCouponId, id, couponShops);
+        // 券后重算：券也是折扣，包邮门槛必须按券后金额重新判断。
+        Pricer.Quote quote = OrderPricing.quoteOf(catalog, pricer, lines, coupon.discount());
+
         // 唯一约束先占位；同 key 的并发请求会在此等待并最终冲突，尚未扣库存。
         orders.insert(id, user, key, hash, quote.subtotal(), quote.discount(), quote.shippingFee(),
-                quote.payable(), expiresAt);
+                quote.payable(), coupon.discount(), coupon.couponId(), coupon.couponCode(), expiresAt);
         // lines 已按商品编号排序，多个订单以相同顺序加库存行锁，降低死锁风险。
         // 下单者用户名与订单号一起交给商品模块：它们会被写进库存流水，
         // 于是「这批货是被哪笔订单占走的」事后可查，不用反推。
@@ -73,12 +109,62 @@ public class OrderTransactions implements OrderCancellation {
             catalog.reserve(item.productId(), item.quantity(), user, id);
             orders.insertItem(id, item);
         }
+        splitIntoSubs(id, shops, baseQuote, quote, coupon);
         // 订单、库存、事件在同一数据库事务中提交或回滚。
         events.publish(id, user, "ORDER_CREATED", "订单已创建，应付 ¥" + quote.payable() + "，等待模拟支付。");
         // 同步应用事件：清袋的订阅方在本事务内执行，与落单同生共死。
         // 放在发件箱事件之后——后者是「异步通知」，这里是「同事务副作用」，不要混用。
         appEvents.publishEvent(new OrderPlacedEvent(id, user));
+        // 走到这里，前面任何一步失败都会让整单回滚，这一行根本不会被执行——
+        // 所以计数放在末尾，而不是入口：入口计数会把「价格已变动被拒」的失败单也算进去。
+        registry.counter(METRIC_ORDER_PLACED).increment();
         return get(id, user);
+    }
+
+    /**
+     * 按店拆出子订单。
+     *
+     * <p>买家只下一次单、只付一次钱，但<b>货是各家店各发各的</b>：一车里有三家的东西，
+     * 就要有三个子订单，各有各的金额与物流。父单上那四列金额仍然是买家付的总数，
+     * 子订单上的四列是<b>这家店该分到的数</b>——两个不同的事实，各留一份。
+     *
+     * <p>分摊规则（满减与运费按各家店小计占比拆分、取整余量按最大余额法派发）
+     * 收在 {@link SubOrderSplitter} 里，那里的硬要求是
+     * <b>Σ 子单金额 = 父单金额，四列逐列相等</b>；本方法只负责把它落库。
+     *
+     * <p>{@code id} = 父单号 + {@code -S} + 序号：它是 (order_id, sub_seq) 的纯函数，
+     * 不需要「取回自增主键」那一趟往返，也就没有两套 id 对不上的可能。
+     */
+    private void splitIntoSubs(String orderId, List<SubOrderSplitter.Shop> shops,
+                               Pricer.Quote baseQuote, Pricer.Quote quote, CouponApplication coupon) {
+        // 只拆「满减 + 最终运费」：券减免已经由优惠券模块逐店算好了（含商家承担与平台补贴），
+        // 再按比例拆一次会得到两份不同的券分摊，子单的 pay 与结算六列就会对不上。
+        List<SubOrderSplitter.Share> shares =
+                SubOrderSplitter.split(shops, baseQuote.discount(), quote.shippingFee());
+        BigDecimal totalDiscount = BigDecimal.ZERO;
+        BigDecimal totalPay = BigDecimal.ZERO;
+        int seq = 1;
+        for (SubOrderSplitter.Share share : shares) {
+            CouponApplication.ShopSettlement settlement = coupon.shopOf(share.merchantId());
+            // 子单的 discount = 满减分摊 + 券减免分摊；pay = 券前应付 − 券减免。
+            BigDecimal discount = share.discount().add(settlement.couponDiscount());
+            BigDecimal pay = share.payAmount().subtract(settlement.couponDiscount());
+            // 结算六列的恒等式由数据库约束检查，这里按定义算出；运费归商家，所以它在 pay 里。
+            BigDecimal merchantIncome = pay.add(settlement.platformSubsidy()).subtract(settlement.platformFee());
+            subs.insert(orderId + "-S" + seq, orderId, seq, share.merchantId(),
+                    share.subtotal(), discount, share.shippingFee(), pay,
+                    settlement.couponDiscount(), settlement.merchantDiscount(), settlement.platformSubsidy(),
+                    settlement.platformFee(), merchantIncome, settlement.platformIncome());
+            totalDiscount = totalDiscount.add(discount);
+            totalPay = totalPay.add(pay);
+            seq++;
+        }
+        // 这是整条链路最后一道金额守恒检查：任何一家店的数字看着合理都不算数，
+        // 只有「Σ 子单 = 父单」才说明这笔订单的钱有且只有一个主人。
+        if (totalDiscount.compareTo(quote.discount()) != 0 || totalPay.compareTo(quote.payable()) != 0) {
+            throw new IllegalStateException("子订单金额与父单不一致：discount "
+                    + totalDiscount + " / " + quote.discount() + "，pay " + totalPay + " / " + quote.payable());
+        }
     }
 
     @Transactional
@@ -101,7 +187,12 @@ public class OrderTransactions implements OrderCancellation {
         // 支付时刻与关单时刻同一个形状：由 Clock 注入，退款窗口、对账才有确定的起点。
         LocalDateTime paidAt = LocalDateTime.now(clock);
         if (orders.markPaid(id, method, receipt, paidAt) != 1) throw notPayable(orders.lock(id).orElse(row));
+        // 券在支付成功这一刻才从「锁定」变成「核销」。放在 markPaid 之后：
+        // 只有真正收到钱的那一次转换，才配把券用掉。
+        coupons.commit(id);
         events.publish(id, user, "ORDER_PAID", "模拟支付成功，订单 " + id.substring(0, 8) + " 已完成。");
+        // 计数在「确认是我改成 PAID」之后：重复支付走上面的幂等分支直接返回，不会记第二次。
+        registry.counter(METRIC_ORDER_PAID).increment();
         return get(id, user);
     }
 
@@ -150,6 +241,9 @@ public class OrderTransactions implements OrderCancellation {
         // 更新成功 = 这笔订单的待支付状态是我终结的，那么归还库存也是我的责任；
         // 更新影响 0 行 = 别人已经处理过，此刻绝不能再还一次库存（重复归还会凭空造出货）。
         if (orders.markClosed(row.id(), reason, LocalDateTime.now(clock)) != 1) return false;
+        // 拿到关单权之后才释放券：与库存同一个顺序——谁终结了这笔待支付订单，
+        // 谁负责把券还回去、把平台补贴预算退掉。不是我就一步都别动。
+        coupons.release(row.id());
         List<OrderView.Item> lines = orders.items(row.id());
         for (OrderView.Item item : lines)
             catalog.release(item.productId(), item.quantity(), row.username(), row.id());
@@ -169,7 +263,7 @@ public class OrderTransactions implements OrderCancellation {
     @Transactional(readOnly = true)
     public OrderView get(String id, String user) { return orders.view(owned(id, user, false)); }
     @Transactional(readOnly = true)
-    public List<OrderView> list(String user) { return orders.list(user).stream().map(orders::view).toList(); }
+    public List<OrderView> list(String user) { return orders.views(orders.list(user)); }
     private OrderRow owned(String id, String user, boolean lock) {
         // 直接在查询中限定用户，避免越权读取或操作他人的订单。
         return orders.find(id, user, lock).orElseThrow(() -> BusinessException.notFound("订单不存在"));

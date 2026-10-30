@@ -123,7 +123,8 @@ class PriceChangeGuardTest {
         // 只要有人把校验挪到 insert 之后，这两个 never 断言就会立即变红。
         verify(orderRepository, never()).insert(anyString(), anyString(), anyString(), anyString(),
                 any(BigDecimal.class), any(BigDecimal.class), any(BigDecimal.class),
-                any(BigDecimal.class), any(LocalDateTime.class));
+                any(BigDecimal.class), any(BigDecimal.class),
+                anyString(), anyString(), any(LocalDateTime.class));
         verify(catalog, never()).reserve(anyLong(), anyInt(), anyString(), anyString());
 
         // 数据库断言只作补充，不拿事务回滚后的零行冒充“写前校验”证据。

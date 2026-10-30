@@ -122,8 +122,8 @@ class RefundDisburseGuardTest {
     void stalledRefundLegIsLoudAndRolledBack() {
         String u = user("stalled");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-STALL-1");
-        RefundView queued = refunds.apply(paid.id(), u, null, "WRONG_ITEM", "发错款式");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-STALL-1");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "WRONG_ITEM", "发错款式");
         assertThat(queued.status()).as("用例前提：这笔在等商家").isEqualTo(RefundView.STATUS_PENDING_APPROVAL);
         long balanceBefore = WalletProbe.balanceCents(jdbc, u);
         int stockBefore = stockOf();
@@ -166,7 +166,7 @@ class RefundDisburseGuardTest {
         mockUpdateReturningZeroRows("UPDATE refund SET status='REFUNDED'");
 
         BusinessException thrown = catchThrowableOfType(
-                () -> refunds.apply(paid.id(), u, null, null, null), BusinessException.class);
+                () -> refunds.apply(paid.id(), SubOrders.only(paid), u, null, null, null), BusinessException.class);
 
         assertThat(thrown).as("自助退款的放款落空同样必须报错").isNotNull();
         assertThat(thrown.code()).isEqualTo("ALREADY_RESOLVED");
@@ -189,8 +189,8 @@ class RefundDisburseGuardTest {
     void approvalStillWorksWithoutTheStub() {
         String u = user("unstubbed");
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-STALL-2");
-        RefundView queued = refunds.apply(paid.id(), u, null, "WRONG_ITEM", "发错款式");
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-STALL-2");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "WRONG_ITEM", "发错款式");
         long before = WalletProbe.balanceCents(jdbc, u);
 
         RefundView refunded = refunds.approve(queued.id(), MERCHANT, "核实后同意");

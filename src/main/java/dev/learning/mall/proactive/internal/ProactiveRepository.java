@@ -38,7 +38,9 @@ class ProactiveRepository {
                                p.category, w.baseline_price, w.in_stock_at_watch, p.price, p.stock
                         FROM mall_product_watch w JOIN product p ON p.id = w.product_id
                         WHERE w.username = :user
-                        ORDER BY w.created_at DESC""")
+                        -- 次排序键 product_id：同一时刻关注的几件商品如果 created_at 相同，
+                        -- 没有它「关注列表」的顺序在两次请求之间就会变。
+                        ORDER BY w.created_at DESC, w.product_id""")
                 .param("user", username).query(ProactiveRepository::mapWatch).list();
     }
 

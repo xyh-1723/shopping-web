@@ -138,8 +138,9 @@ class MallIntegrationTest {
                 .andExpect(jsonPath("$.total").value(productCount));
         mvc.perform(get("/api/orders")).andExpect(status().isUnauthorized());
         mvc.perform(get("/actuator/health")).andExpect(status().isOk());
+        // API 不再用 CSRF 防护（改由 SameSite Cookie 承担）；空请求体 {} 会被校验拦截返回 400。
         mvc.perform(post("/api/orders").with(user("student")).contentType("application/json").content("{}"))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isBadRequest());
     }
     @Test void realFormLoginWorks() throws Exception {
         mvc.perform(formLogin().user("student").password("learn12345")).andExpect(authenticated().withUsername("student"));

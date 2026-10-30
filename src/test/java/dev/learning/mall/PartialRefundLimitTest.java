@@ -89,7 +89,7 @@ class PartialRefundLimitTest {
         long afterPay = WalletProbe.balanceCents(jdbc, user);
 
         // ① 第一笔：部分退款 ¥20，AUTO 放款成功。
-        RefundView first = refunds.apply(paid.id(), user, new BigDecimal("20.00"), "NO_REASON", "先退一部分");
+        RefundView first = refunds.apply(paid.id(), SubOrders.only(paid), user, new BigDecimal("20.00"), "NO_REASON", "先退一部分");
         assertThat(first.status()).isEqualTo(RefundView.STATUS_REFUNDED);
         assertThat(first.route()).isEqualTo(RefundView.ROUTE_AUTO);
         long afterFirst = WalletProbe.balanceCents(jdbc, user);
@@ -98,7 +98,7 @@ class PartialRefundLimitTest {
 
         // ② 第二笔：服务层放行（不在途、累计未超实付），被数据层唯一索引挡下。
         DuplicateKeyException rejected = catchThrowableOfType(
-                () -> refunds.apply(paid.id(), user, new BigDecimal("10.00"), "NO_REASON", "再退一部分"),
+                () -> refunds.apply(paid.id(), SubOrders.only(paid), user, new BigDecimal("10.00"), "NO_REASON", "再退一部分"),
                 DuplicateKeyException.class);
         assertThat(rejected).as("同一订单第二次放款必须被 uq_wallet_ledger_order_reason 拒")
                 .isNotNull();

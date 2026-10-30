@@ -1,5 +1,6 @@
 package dev.learning.mall.assistant.internal;
 
+import dev.learning.mall.common.MdcTaskDecorator;
 import java.util.concurrent.ThreadPoolExecutor;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
@@ -49,6 +50,9 @@ class AssistantAsyncConfig implements WebMvcConfigurer {
         executor.setQueueCapacity(Math.max(0, config.getQueueCapacity()));
         executor.setThreadNamePrefix("assistant-turn-");
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        // D1：把 MDC（traceId）从提交请求的 Web 线程拷到助手线程，
+        // 否则一轮回答的日志在「Web 线程 → 助手线程」的边界上断成两截。
+        executor.setTaskDecorator(new MdcTaskDecorator());
         // 关停时把正在跑的轮次跑完：让用户拿到答案，比立刻断开更友好。
         executor.setWaitForTasksToCompleteOnShutdown(true);
         executor.setAwaitTerminationSeconds(20);

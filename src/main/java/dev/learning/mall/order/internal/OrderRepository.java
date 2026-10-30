@@ -4,14 +4,18 @@ import dev.learning.mall.order.api.OrderView;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Repository;
 
 @Repository
 public class OrderRepository {
     private final JdbcClient jdbc;
-    OrderRepository(JdbcClient jdbc) { this.jdbc = jdbc; }
+    /** 子订单：父单的视图必须带上它们，所以这里直接持有——不经过 Service，避免循环依赖。 */
+    private final OrderSubRepository subs;
+    OrderRepository(JdbcClient jdbc, OrderSubRepository subs) { this.jdbc = jdbc; this.subs = subs; }
     Optional<OrderRow> byKey(String user, String key) {
         return jdbc.sql("SELECT * FROM mall_order WHERE username = :user AND idempotency_key = :key")
                 .param("user", user).param("key", key).query(OrderRow.class).optional();
@@ -97,18 +101,25 @@ public class OrderRepository {
      * 这是唯一一处写这两列的地方，别在别处补写。
      */
     public void insert(String id, String user, String key, String hash, BigDecimal subtotal, BigDecimal discount,
-                BigDecimal shippingFee, BigDecimal payAmount, LocalDateTime expiresAt) {
+                BigDecimal shippingFee, BigDecimal payAmount, BigDecimal couponDiscount,
+                String couponId, String couponCode, LocalDateTime expiresAt) {
         // 分片键在这里由订单号算出，不交给调用方传：它是订单号的纯函数，
         // 多一个入口传值就多一处「两个实例算出不同结果」的机会，而那会直接导致
         // 某些订单没有任何实例负责扫描。
         int expiryShard = OrderShard.of(id);
         jdbc.sql("""
                         INSERT INTO mall_order(id,username,idempotency_key,request_hash,total,
-                                               subtotal,discount,shipping_fee,pay_amount,status,expires_at,expiry_shard)
-                        VALUES(:id,:user,:key,:hash,:pay,:subtotal,:discount,:shippingFee,:pay,'PENDING',:expiresAt,:shard)""")
+                                               subtotal,discount,shipping_fee,pay_amount,
+                                               coupon_discount,coupon_id,coupon_code,
+                                               status,expires_at,expiry_shard)
+                        VALUES(:id,:user,:key,:hash,:pay,:subtotal,:discount,:shippingFee,:pay,
+                               :couponDiscount,:couponId,:couponCode,
+                               'PENDING',:expiresAt,:shard)""")
                 .param("id", id).param("user", user).param("key", key).param("hash", hash)
                 .param("pay", payAmount).param("subtotal", subtotal).param("discount", discount)
-                .param("shippingFee", shippingFee).param("expiresAt", expiresAt)
+                .param("shippingFee", shippingFee).param("couponDiscount", couponDiscount)
+                .param("couponId", couponId).param("couponCode", couponCode)
+                .param("expiresAt", expiresAt)
                 .param("shard", expiryShard).update();
     }
     /**
@@ -132,6 +143,20 @@ public class OrderRepository {
         return jdbc.sql("SELECT product_id,product_name,unit_price,quantity FROM order_item WHERE order_id=:id ORDER BY product_id")
                 .param("id", id).query(OrderView.Item.class).list();
     }
+
+    /**
+     * 某一家店在这笔订单里的明细。
+     *
+     * <p>退款还货必须用它而不是 {@link #items(String)}：跨店订单退的是<b>那一家店</b>的钱，
+     * 顺手把别家的货也还回去，等于替另一家店做了一次「已退款」——
+     * 而那家店此刻可能正在给买家发货。
+     */
+    List<OrderView.Item> itemsOfMerchant(String id, long merchantId) {
+        return jdbc.sql("SELECT product_id,product_name,unit_price,quantity FROM order_item"
+                        + " WHERE order_id=:id AND merchant_id=:m ORDER BY product_id")
+                .param("id", id).param("m", merchantId).query(OrderView.Item.class).list();
+    }
+
     /**
      * 返回影响行数：1 表示这次支付真的发生了。
      *
@@ -160,101 +185,68 @@ public class OrderRepository {
                 .param("id", id).param("reason", reason).param("closedAt", closedAt).update();
     }
 
-    // ——————————————————— 履约：四条（连同自动收货共五条）状态迁移 ———————————————————
+    // ——————————————————— 视图 ———————————————————
 
     /**
-     * 发货：把履约状态从 {@code NONE} 推到 {@code SHIPPED}（§2.6 第一式）。
+     * 父单行 → 对外视图（含全部子订单）。
      *
-     * <p><b>前置条件写死在 WHERE 里</b>，与 {@link #markClosed} 同一套写法：
-     * 影响 1 行 = 「这次状态转换是我完成的」，于是写 {@code shipped_at}、发
-     * {@code ORDER_SHIPPED} 也是我的责任；影响 0 行 = 别人已经处理过，调用方安静跳过。
-     * {@code status='PAID'} 这一半是「钱到账才配货」的落点——越过它的代价是
-     * {@code ck_order_fulfillment_needs_paid} 把这次发货当场打回。
+     * <p>子订单在这里拼进来而不是让每个调用方自己再查一次：
+     * 「一笔订单是什么样子」只有一处定义，于是「前端看到的」与「助手看到的」
+     * 不可能是两个不同的订单。
      *
-     * <p>{@code autoReceiveAt} 由调用方算好传入（= 发货时刻 + 配置的自动收货天数），
-     * 在发货这一刻落库：与 {@code expiresAt} 同一个道理——运营事后把 10 天改成 7 天，
-     * 不该让已经在这批路上的订单一起跳变。
+     * <p><b>单个订单用它；列表请用 {@link #views(List)}。</b>这个方法每调一次至少 3 条 SQL
+     * （明细 + 子订单 + 每个子订单的明细），套在循环里就是典型的 N+1。
      */
-    int markShipped(String id, String staff, String shippingNo, LocalDateTime shippedAt, LocalDateTime autoReceiveAt) {
-        return jdbc.sql("UPDATE mall_order SET fulfillment_status='SHIPPED',shipped_at=:now,shipped_by=:staff,"
-                        + "shipping_no=:no,auto_receive_at=:auto"
-                        + " WHERE id=:id AND status='PAID' AND fulfillment_status='NONE'")
-                .param("id", id).param("staff", staff).param("no", shippingNo)
-                .param("now", shippedAt).param("auto", autoReceiveAt).update();
-    }
-
-    /**
-     * 买家确认收货：{@code SHIPPED → RECEIVED}（§2.6 第二式）。
-     *
-     * <p>{@code username = :user} 是<b>归属校验</b>，不是可选装饰：没有它，任何人都能替别人
-     * 点掉「确认收货」，而这一步直接决定退款窗口与售后起算点。去掉它以后，别人的订单
-     * 依然能被这条 UPDATE 命中（影响 1 行），所以这条校验只能在 WHERE 里，不能挪到
-     * 调用方的 if 里——挪到 if 里，调用方漏判一次就全线失守。
-     */
-    int markReceived(String id, String user, LocalDateTime receivedAt) {
-        return jdbc.sql("UPDATE mall_order SET fulfillment_status='RECEIVED',received_at=:now"
-                        + " WHERE id=:id AND username=:user AND fulfillment_status='SHIPPED'")
-                .param("id", id).param("user", user).param("now", receivedAt).update();
-    }
-
-    /** 买家确认完成：{@code RECEIVED → COMPLETED}（§2.6 第三式），同样带归属校验。 */
-    int markCompleted(String id, String user, LocalDateTime completedAt) {
-        return jdbc.sql("UPDATE mall_order SET fulfillment_status='COMPLETED',completed_at=:now"
-                        + " WHERE id=:id AND username=:user AND fulfillment_status='RECEIVED'")
-                .param("id", id).param("user", user).param("now", completedAt).update();
-    }
-
-    /**
-     * 自动收货第一步：{@code SHIPPED → RECEIVED}（§2.3 状态图要求、§2.6 语句模板漏掉的那一条）。
-     *
-     * <p>系统路径<b>不带</b> username，与 {@link #lock(String)} 同一个道理：自动收货不是
-     * 任何一次用户请求，让它先知道「是谁在操作」是没有意义的。
-     *
-     * <p>{@code auto_receive_at <= :due} 在这里是<b>第二道</b>到期校验（第一道在
-     * {@link #dueForAutoReceive}）：候选集挑出来之后到拿到行锁之间，买家可能已经自己收货、
-     * 也可能有人改了调度时刻；规则不该依赖「候选集一定没挑错」。
-     */
-    int markAutoReceived(String id, LocalDateTime receivedAt, LocalDateTime due) {
-        return jdbc.sql("UPDATE mall_order SET fulfillment_status='RECEIVED',received_at=:now"
-                        + " WHERE id=:id AND fulfillment_status='SHIPPED' AND auto_receive_at<=:due")
-                .param("id", id).param("now", receivedAt).param("due", due).update();
-    }
-
-    /**
-     * 自动收货第二步：{@code RECEIVED → COMPLETED}（§2.6 第四式原样保留）。
-     *
-     * <p>它<b>不能</b>与 {@link #markAutoReceived} 合成一条 {@code SHIPPED → COMPLETED}：
-     * 那样写出来 {@code received_at} 仍是 NULL，而 {@code COMPLETED} 要求三个时刻齐全，
-     * {@code ck_order_fulfillment_fields} 会把整条语句打回——「必须两步」是数据库逼出来的，
-     * 不是排版偏好。见 {@code FulfillmentFlowTest#skipReceivedCannotReachCompleted}。
-     */
-    int markAutoCompleted(String id, LocalDateTime completedAt, LocalDateTime due) {
-        return jdbc.sql("UPDATE mall_order SET fulfillment_status='COMPLETED',completed_at=:now"
-                        + " WHERE id=:id AND fulfillment_status='RECEIVED' AND auto_receive_at<=:due")
-                .param("id", id).param("now", completedAt).param("due", due).update();
-    }
-
-    /**
-     * 到期该被自动收货的订单：{@code SHIPPED}（等着自动确认收货）与 {@code RECEIVED}（等着自动完成）。
-     *
-     * <p>{@code auto_receive_at IS NOT NULL} 是刻意的：没有到期时刻的订单永远不该被自动推进，
-     * 与 {@link #expiredPending} 里 {@code expires_at IS NOT NULL} 同一个道理——
-     * 「没有截止时间」不等于「早于任何时刻」。
-     */
-    List<String> dueForAutoReceive(LocalDateTime now, int limit) {
-        return jdbc.sql("""
-                        SELECT id FROM mall_order
-                         WHERE fulfillment_status IN ('SHIPPED','RECEIVED')
-                           AND auto_receive_at IS NOT NULL AND auto_receive_at <= :now
-                         ORDER BY auto_receive_at, id
-                         LIMIT :limit""")
-                .param("now", now).param("limit", limit).query(String.class).list();
-    }
     OrderView view(OrderRow row) {
-        return new OrderView(row.id(), row.status(), row.total(), row.subtotal(), row.discount(),
-                row.shippingFee(), row.payAmount(), row.paymentMethod(), row.paymentReceipt(),
-                row.createdAt(), items(row.id()), row.expiresAt(), row.closeReason(), row.closedAt(),
-                row.paidAt(), row.fulfillmentStatus(), row.shippedAt(), row.shippingNo(),
-                row.receivedAt(), row.completedAt());
+        return view(row, items(row.id()), subs.viewsOf(row.id()));
     }
+
+    /**
+     * 一批父单 → 对外视图。<b>固定 3 条 SQL，与订单数量无关。</b>
+     *
+     * <p>为什么必须批量：列表页一次要 20 单，逐单 {@link #view(OrderRow)} 就是
+     * 1 + 20×(1 明细 + 1 子订单 + N 子单明细) ≈ 60 条 SQL，实测 p50 从 6ms 涨到 50ms。
+     * 而订单列表不只一个入口——助手的 {@code CustomerTools}、{@code StaffTools}、
+     * 三种待确认动作、推荐服务都走这条链，慢一次就是慢一圈。
+     *
+     * <p><b>结果与逐单调用完全一致</b>是这里唯一的不变量：批量只是把往返合并，
+     * 不改变任何字段、也不改变顺序。
+     */
+    List<OrderView> views(List<OrderRow> rows) {
+        if (rows.isEmpty()) return List.of();
+        List<String> ids = rows.stream().map(OrderRow::id).toList();
+        Map<String, List<OrderView.Item>> itemsByOrder = itemsOfOrders(ids);
+        Map<String, List<OrderView.SubView>> subsByOrder = subs.viewsOfOrders(ids);
+        return rows.stream()
+                .map(row -> view(row,
+                        itemsByOrder.getOrDefault(row.id(), List.of()),
+                        subsByOrder.getOrDefault(row.id(), List.of())))
+                .toList();
+    }
+
+    private OrderView view(OrderRow row, List<OrderView.Item> items, List<OrderView.SubView> subs) {
+        return new OrderView(row.id(), row.status(), row.total(), row.subtotal(), row.discount(),
+                row.shippingFee(), row.payAmount(), row.couponDiscount(), row.couponCode(),
+                row.paymentMethod(), row.paymentReceipt(),
+                row.createdAt(), items, subs, row.expiresAt(),
+                row.closeReason(), row.closedAt(), row.paidAt());
+    }
+
+    /**
+     * 一批父单的全部明细，按父单分桶。带上 {@code order_id} 才能分桶，
+     * 所以先落到一个中间行 {@link ScopedOrderItem}，再翻译成对外的 {@link OrderView.Item}。
+     */
+    private Map<String, List<OrderView.Item>> itemsOfOrders(List<String> ids) {
+        return jdbc.sql("SELECT order_id,product_id,product_name,unit_price,quantity FROM order_item"
+                        + " WHERE order_id IN (:ids) ORDER BY order_id,product_id")
+                .param("ids", ids).query(ScopedOrderItem.class).list().stream()
+                .collect(Collectors.groupingBy(ScopedOrderItem::orderId,
+                        Collectors.mapping(item -> new OrderView.Item(item.productId(),
+                                item.productName(), item.unitPrice(), item.quantity()),
+                                Collectors.toList())));
+    }
+
+    /** 明细行 + 它属于哪个父单。只用于批量装配。 */
+    private record ScopedOrderItem(String orderId, long productId, String productName,
+                                   BigDecimal unitPrice, int quantity) {}
 }

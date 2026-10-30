@@ -166,13 +166,13 @@ class RefundStockIdempotenceTest {
         String u = user("received");
         long baseLedgerId = maxLedgerId(PRODUCT_ID);
         OrderView paid = payWithWallet(u);
-        fulfillment.ship(paid.id(), "admin", "SF-RECV-1");
-        fulfillment.receive(paid.id(), u);
+        fulfillment.ship(SubOrders.only(paid), "admin", "SF-RECV-1");
+        fulfillment.receive(SubOrders.only(paid), u);
         // 收货后现货是「初始 − 1」：这笔货已经不在货架上了。
         int stockAfterShip = stockOf(PRODUCT_ID);
         assertThat(stockAfterShip).isEqualTo(START_STOCK - 1);
 
-        RefundView queued = refunds.apply(paid.id(), u, null, "NO_REASON", "不喜欢");
+        RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), u, null, "NO_REASON", "不喜欢");
         assertThat(queued.route()).as("已收货必须走商家审批").isEqualTo(RefundView.ROUTE_MERCHANT_APPROVAL);
 
         RefundView refunded = refunds.approve(queued.id(), MERCHANT, "同意");
@@ -205,7 +205,7 @@ class RefundStockIdempotenceTest {
         OrderView paid = payWithWallet(u);
         assertThat(stockOf(PRODUCT_ID)).isEqualTo(stockBase - 1);
 
-        RefundView refund = refunds.apply(paid.id(), u, null, null, null);
+        RefundView refund = refunds.apply(paid.id(), SubOrders.only(paid), u, null, null, null);
 
         assertThat(refund.status()).isEqualTo(RefundView.STATUS_REFUNDED);
         assertThat(stockOf(PRODUCT_ID)).as("未发货退款：货要真的回到货架").isEqualTo(stockBase);
@@ -338,7 +338,7 @@ class RefundStockIdempotenceTest {
         BigDecimal previousMax = properties.getRefund().getAutoRefundMaxAmount();
         properties.getRefund().setAutoRefundMaxAmount(new BigDecimal("1.00"));
         try {
-            RefundView queued = refunds.apply(paid.id(), username, null, null, null);
+            RefundView queued = refunds.apply(paid.id(), SubOrders.only(paid), username, null, null, null);
             assertThat(queued.route()).as("用例前提：这笔必须落到商家队列").isEqualTo(
                     RefundView.ROUTE_MERCHANT_APPROVAL);
             return queued;
